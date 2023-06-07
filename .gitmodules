@@ -1,0 +1,3 @@
+[submodule "SCTL"]
+	path = SCTL
+	url = git@github.com:dmalhotra/SCTL.git
