@@ -72,8 +72,8 @@ namespace sctl {
     return std::make_pair<Real,Real>(theta0_[idx], theta1_[idx]);
   }
 
-  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::GetGeom(Vector<Real>* X, Vector<Real>* Normal, Vector<Real>* theta) const {
-    PanelType::GetGeom(X, Normal);
+  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::GetGeom(Vector<Real>* X, Vector<Real>* Normal, Vector<Real>* SurfWts, Vector<Real>* theta) const {
+    PanelType::GetGeom(X, Normal, SurfWts);
     if (theta) {
       const Long Npanel = PanelCount();
       if (theta->Dim() != Npanel * Order) theta->ReInit(Npanel * Order);
@@ -108,17 +108,19 @@ namespace sctl {
     return N;
   }
 
-  template <class Real, class Disc> void GetGeom(const Vector<Disc>& disc_lst, Vector<Real>* X, Vector<Real>* Normal) {
-    const Long N = NodeCount(disc_lst) * Disc::CoordDim();
-    if (X && X->Dim() != N) X->ReInit(N);
-    if (Normal && Normal->Dim() != N) Normal->ReInit(N);
+  template <class Real, class Disc> void GetGeom(const Vector<Disc>& disc_lst, Vector<Real>* X, Vector<Real>* Normal, Vector<Real>* SurfWts) {
+    const Long N = NodeCount(disc_lst);
+    if (X && X->Dim() != N*Disc::CoordDim()) X->ReInit(N*Disc::CoordDim());
+    if (Normal && Normal->Dim() != N*Disc::CoordDim()) Normal->ReInit(N*Disc::CoordDim());
+    if (SurfWts && SurfWts->Dim() != N) SurfWts->ReInit(N);
 
     Long offset = 0;
     for (Long i = 0; i < disc_lst.Dim(); i++) {
-      const Long N_ = disc_lst[i].NodeCount() * Disc::CoordDim();
-      Vector<Real> X_((X ? N_ : 0), (X ? X->begin()+offset : NullIterator<Real>()), false);
-      Vector<Real> Normal_((Normal ? N_ : 0), (Normal ? Normal->begin()+offset : NullIterator<Real>()), false);
-      disc_lst[i].GetGeom((X?&X_:nullptr), (Normal?&Normal_:nullptr));
+      const Long N_ = disc_lst[i].NodeCount();
+      Vector<Real> X_((X ? N_*Disc::CoordDim() : 0), (X ? X->begin() + offset*Disc::CoordDim() : NullIterator<Real>()), false);
+      Vector<Real> Normal_((Normal ? N_*Disc::CoordDim() : 0), (Normal ? Normal->begin() + offset*Disc::CoordDim() : NullIterator<Real>()), false);
+      Vector<Real> SurfWts_((SurfWts ? N_ : 0), (Normal ? Normal->begin() + offset : NullIterator<Real>()), false);
+      disc_lst[i].GetGeom((X?&X_:nullptr), (Normal?&Normal_:nullptr), (SurfWts?&SurfWts_:nullptr));
       offset += N_;
     }
   }
@@ -142,7 +144,7 @@ namespace sctl {
     }
   }
 
-  template <class Real, class KerFn, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol) {
+  template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol) {
     const Long Ns = NodeCount(disc_lst);
     const Long Nt = Xt.Dim() / KerFn::CoordDim();
     SCTL_ASSERT(Xt.Dim() == Nt * KerFn::CoordDim());
@@ -160,7 +162,7 @@ namespace sctl {
     }
   }
 
-  template <class Real, class KerFn, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) {
+  template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) {
     const Long Ns = NodeCount(disc_lst);
     const Long Nt = Xt.Dim() / KerFn::CoordDim();
     SCTL_ASSERT(Xt.Dim() == Nt * KerFn::CoordDim());

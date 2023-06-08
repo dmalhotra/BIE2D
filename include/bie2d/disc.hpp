@@ -71,11 +71,11 @@ namespace sctl {
     std::pair<Real,Real> PanelRange(Long panel_idx) const;
 
     /**
-     * \brief Return the position vector X, the normal vector Normal, and the
-     * theta values at the surface discretization nodes. The values are in AoS
-     * order.
+     * \brief Return the position vector X, the normal vector Normal, the
+     * surface quadrature weights SurfWts, and the theta values at the surface
+     * discretization nodes. The values are in AoS order.
      */
-    void GetGeom(Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr, Vector<Real>* theta = nullptr) const;
+    void GetGeom(Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr, Vector<Real>* SurfWts = nullptr, Vector<Real>* theta = nullptr) const;
 
 
 
@@ -116,11 +116,12 @@ namespace sctl {
   template <class Disc> Long NodeCount(const Vector<Disc>& disc_lst);
 
   /**
-   * \brief Return the position vector X, the normal vector Normal, and the
-   * theta values at the surface discretization nodes for all discs in disc_lst.
-   * The values are in AoS order.
+   * \brief Return the position vector X, the normal vector Normal, the
+   * surface quadrature weights SurfWts, and the theta values at the surface
+   * discretization nodes for all discs in disc_lst.  The values are in AoS
+   * order.
    */
-  template <class Real, class Disc> void GetGeom(const Vector<Disc>& disc_lst, Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr);
+  template <class Real, class Disc> void GetGeom(const Vector<Disc>& disc_lst, Vector<Real>* X = nullptr, Vector<Real>* SurfWts = nullptr, Vector<Real>* Normal = nullptr);
 
   /**
    * Compute the surface integral from function values F given at surface
@@ -133,7 +134,7 @@ namespace sctl {
    * convolution of a kernel function with a surface density F given at the
    * surface discretization nodes of all discs in disc_lst.
    */
-  template <class Real, class KerFn, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol = 1e-10);
+  template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol = 1e-10);
 
   /**
    * Return the operator matrix M for the layer potential operator.
@@ -142,7 +143,7 @@ namespace sctl {
    * discretization points on all discs in disc_lst, and K0 x K1 is the kernel
    * function dimension.
    */
-  template <class Real, class KerFn, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol = 1e-10);
+  template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol = 1e-10);
 
 }
 

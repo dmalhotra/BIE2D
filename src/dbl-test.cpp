@@ -15,7 +15,7 @@ template <class Real, class KerFn> void DoubleLayerTest(Real tol = 1e-10) {
   F = 1; // density
 
   Vector<Real> U;
-  LayerPotential<Real, KerFn>(U, disc_lst, X, F, tol);
+  LayerPotential<KerFn>(U, disc_lst, X, F, tol);
 
   auto max_norm = [](const sctl::Vector<Real>& U) {
     Real max_val = 0;

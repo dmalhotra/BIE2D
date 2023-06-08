@@ -27,9 +27,17 @@ namespace sctl {
       return Npanel;
     }
 
-    void GetGeom(Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr) const {
+    void GetGeom(Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr, Vector<Real>* SurfWts = nullptr) const {
       if (X) *X = X_;
       if (Normal) *Normal = Normal_;
+      if (SurfWts) {
+        if (SurfWts->Dim() != Npanel*Order) SurfWts->ReInit(Npanel*Order);
+        for (Long i = 0; i < Npanel; i++) {
+          for (Long j = 0; j < Order; j++) {
+            (*SurfWts)[i] = dS_[i*Order+j] * Wts()[j];
+          }
+        }
+      }
     }
 
     void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const {
