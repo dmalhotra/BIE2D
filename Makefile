@@ -52,7 +52,8 @@ OBJDIR = ./obj
 INCDIR = ./include
 
 TARGET_BIN = \
-       $(BINDIR)/dbl-test
+       $(BINDIR)/dbl-test \
+       $(BINDIR)/bie-solve
 
 all : $(TARGET_BIN)
 
@@ -67,7 +68,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 .PHONY: all check clean
 
 test: $(TARGET_BIN)
-	./$(BINDIR)/dbl-test
+	for f in $^ ; do ./$$f ; done
 
 clean:
 	$(RM) -r $(BINDIR)/* $(OBJDIR)/*
