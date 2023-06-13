@@ -244,7 +244,7 @@ namespace sctl {
       static const Vector<Vector<Real>> nds_wts = []() {
         Vector<Vector<Real>> nds_wts(2*Order);
         for (Long i = 0; i < Order; i++) {
-          const Integer RefLevels = 1;
+          const Integer RefLevels = 2;
           const Integer LegQuadOrder = Order;
 
           auto DyadicQuad = [](Vector<Real>& nds, Vector<Real>& wts, const Integer LegQuadOrder, const Real s, const Integer levels, bool sort) {
@@ -252,40 +252,40 @@ namespace sctl {
             //const auto& log_quad_nds = LogSingularityQuadRule<Real>(LogQuadOrder).first;
             //const auto& log_quad_wts = LogSingularityQuadRule<Real>(LogQuadOrder).second;
             const Real log_quad_nds[] = {
-             2.0514967686824876939e-4,
-             1.0941116879700402194e-3,
-             4.3764467518801608777e-3,
-             1.3129579319567921241e-2,
-             3.1319422347023467220e-2,
-             6.4282044649094551893e-2,
-             1.1747685196991742595e-1,
-             1.9517904328816939977e-1,
-             2.9080420394081645443e-1,
-             4.0548336046512355400e-1,
-             5.4163934280979149964e-1,
-             6.8903327906975289198e-1,
-             8.1096672093024710801e-1,
-             8.9441573256030574193e-1,
-             9.7374799946956884221e-1,
-             9.9888924244762452447e-1
+             (Real)2.0514967686824876939e-4L,
+             (Real)1.0941116879700402194e-3L,
+             (Real)4.3764467518801608777e-3L,
+             (Real)1.3129579319567921241e-2L,
+             (Real)3.1319422347023467220e-2L,
+             (Real)6.4282044649094551893e-2L,
+             (Real)1.1747685196991742595e-1L,
+             (Real)1.9517904328816939977e-1L,
+             (Real)2.9080420394081645443e-1L,
+             (Real)4.0548336046512355400e-1L,
+             (Real)5.4163934280979149964e-1L,
+             (Real)6.8903327906975289198e-1L,
+             (Real)8.1096672093024710801e-1L,
+             (Real)8.9441573256030574193e-1L,
+             (Real)9.7374799946956884221e-1L,
+             (Real)9.9888924244762452447e-1L
             };
             const Real log_quad_wts[] = {
-             6.4792916533086934623e-4,
-             1.2239247035761293717e-3,
-             5.9008349675174082927e-3,
-             1.2273728802285266544e-2,
-             2.5005188361723080279e-2,
-             4.1791379511932083369e-2,
-             6.5667543912496655405e-2,
-             8.8087941085870205392e-2,
-             1.0358776334798933346e-1,
-             1.2634697527479733119e-1,
-             1.4452810601255058206e-1,
-             1.4433961886609537948e-1,
-             9.2589501060143818582e-2,
-             8.7562563835839909214e-2,
-             5.7349021984199575159e-2,
-             3.0979791076523728382e-3
+             (Real)6.4792916533086934623e-4L,
+             (Real)1.2239247035761293717e-3L,
+             (Real)5.9008349675174082927e-3L,
+             (Real)1.2273728802285266544e-2L,
+             (Real)2.5005188361723080279e-2L,
+             (Real)4.1791379511932083369e-2L,
+             (Real)6.5667543912496655405e-2L,
+             (Real)8.8087941085870205392e-2L,
+             (Real)1.0358776334798933346e-1L,
+             (Real)1.2634697527479733119e-1L,
+             (Real)1.4452810601255058206e-1L,
+             (Real)1.4433961886609537948e-1L,
+             (Real)9.2589501060143818582e-2L,
+             (Real)8.7562563835839909214e-2L,
+             (Real)5.7349021984199575159e-2L,
+             (Real)3.0979791076523728382e-3L
             };
             const auto& leg_nds = LegendreQuadRule<Real>(LegQuadOrder).first;
             const auto& leg_wts = LegendreQuadRule<Real>(LegQuadOrder).second;
@@ -345,24 +345,23 @@ namespace sctl {
           auto& nds = nds_wts[2*i+0];
           auto& wts = nds_wts[2*i+1];
           DyadicQuad(nds, wts, LegQuadOrder, Nds()[i], RefLevels, false);
-          nds += Nds()[i];
         }
         return nds_wts;
       }();
       static const Vector<Matrix<Real>> interp_mat = []() {
         Vector<Matrix<Real>> interp_mat(2*Order);
         for (Long i = 0; i < Order; i++) {
-          interp_mat[2*i+0] = InterpMat(Nds(), nds_wts[2*i+0]);
+          interp_mat[2*i+0] = InterpMat(Nds()-Nds()[i], nds_wts[2*i+0]);
           interp_mat[2*i+1] = interp_mat[2*i+0].Transpose();
         }
         return interp_mat;
       }();
 
-      const Vector<Real>& nds = nds_wts[idx*2+0];
+      //const Vector<Real>& nds = nds_wts[idx*2+0]; // in the interval [0,1]-Nds()[idx]
       const Vector<Real>& wts = nds_wts[idx*2+1];
       const Matrix<Real>& Minterp = interp_mat[idx*2+0];
       const Matrix<Real>& Minterp_t = interp_mat[idx*2+1];
-      const Long Nnds = nds.Dim();
+      const Long Nnds = wts.Dim();
 
       Matrix<Real> Xs_(Nnds,COORD_DIM), dXs_(Nnds,COORD_DIM);
       Matrix<Real>::GEMM(Xs_, Minterp_t, Matrix<Real>(Order,COORD_DIM, (Iterator<Real>)Xs.begin(), false));

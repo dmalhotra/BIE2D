@@ -26,6 +26,42 @@ namespace sctl {
       return KDIM1;
     }
 
+    template <class Real> static void KerEval(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& Xs, const Vector<Real>& Xs_n, const Vector<Real>& F) {
+      constexpr Integer KDIM0 = SrcDim();
+      constexpr Integer KDIM1 = TrgDim();
+
+      const Long Ns = Xs.Dim() / 2;
+      const Long Nt = Xt.Dim() / 2;
+      if (U.Dim() != Nt*KDIM1) U.ReInit(Nt*KDIM1);
+      U = 0;
+
+      for (Long t = 0; t < Nt; t++) {
+        Real U_[KDIM1];
+        for (Long  k1 = 0; k1 < KDIM1; k1++) U_[k1] = 0;
+
+        for (Long s = 0; s < Ns; s++) {
+          const Real r[2] = {Xt[t*2+0]-Xs[s*2+0], Xt[t*2+1]-Xs[s*2+1]};
+          Real n[2] = {0,0};
+          if (Xs_n.Dim()) {
+            n[0] = Xs_n[s*2+0];
+            n[1] = Xs_n[s*2+1];
+          }
+
+          Real M_[KDIM0][KDIM1];
+          uKernel::template uKerMatrix<10>(M_, r, n, nullptr);
+          for (Long  k0 = 0; k0 < KDIM0; k0++) {
+            for (Long  k1 = 0; k1 < KDIM1; k1++) {
+              U_[k1] += M_[k0][k1] * F[s*KDIM0+k0];
+            }
+          }
+        }
+
+        for (Long  k1 = 0; k1 < KDIM1; k1++) {
+          U[t*KDIM1+k1] = U_[k1] * uKernel::template uKerScaleFactor<Real>();
+        }
+      }
+    }
+
     private:
 
     friend uKernel;

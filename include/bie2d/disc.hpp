@@ -121,7 +121,7 @@ namespace sctl {
    * discretization nodes for all discs in disc_lst.  The values are in AoS
    * order.
    */
-  template <class Real, class Disc> void GetGeom(const Vector<Disc>& disc_lst, Vector<Real>* X = nullptr, Vector<Real>* SurfWts = nullptr, Vector<Real>* Normal = nullptr);
+  template <class Real, class Disc> void GetGeom(const Vector<Disc>& disc_lst, Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr, Vector<Real>* SurfWts = nullptr);
 
   /**
    * Compute the surface integral from function values F given at surface
