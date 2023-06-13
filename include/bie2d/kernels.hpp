@@ -93,7 +93,7 @@ namespace sctl {
       return 0;
     }
     template <class Real> static constexpr Real uKerScaleFactor() {
-      return -1 / (2 * const_pi<Real>());
+      return 1 / (2 * const_pi<Real>());
     }
     template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[1][1], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
       const VecType r2 = r[0]*r[0]+r[1]*r[1];
@@ -153,7 +153,7 @@ namespace sctl {
       return 0;
     }
     template <class Real> static constexpr Real uKerScaleFactor() {
-      return -1 / const_pi<Real>();
+      return 1 / const_pi<Real>();
     }
     template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
       const VecType r2 = r[0]*r[0]+r[1]*r[1];

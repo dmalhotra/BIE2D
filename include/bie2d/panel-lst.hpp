@@ -150,8 +150,8 @@ namespace sctl {
           const Real dr_inv = 1/dr;
 
           dS_[i*Order+j] = dr;
-          Normal_[(i*Order+j)*COORD_DIM+0] = -dy * dr_inv;
-          Normal_[(i*Order+j)*COORD_DIM+1] =  dx * dr_inv;
+          Normal_[(i*Order+j)*COORD_DIM+0] =  dy * dr_inv;
+          Normal_[(i*Order+j)*COORD_DIM+1] = -dx * dr_inv;
         }
       }
     }
@@ -211,7 +211,7 @@ namespace sctl {
         const Real dx[2] = {dXs(i,0), dXs(i,1)};
         const Real da = sqrt<Real>(dx[0]*dx[0] + dx[1]*dx[1]);
         const Real da_inv = 1/da;
-        const Real n[2] = {-dx[1]*da_inv, dx[0]*da_inv};
+        const Real n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
 
         Real M_[KDIM0][KDIM1];
         KerFn::template uKerMatrix<digits,Real>(M_, r, n, nullptr);
@@ -373,7 +373,7 @@ namespace sctl {
         const Real dx[2] = {dXs_[i][0], dXs_[i][1]};
         const Real da = sqrt<Real>(dx[0]*dx[0] + dx[1]*dx[1]);
         const Real da_inv = 1/da;
-        const Real n[2] = {-dx[1]*da_inv, dx[0]*da_inv};
+        const Real n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
 
         Real M_[KDIM0][KDIM1];
         KerFn::template uKerMatrix<digits,Real>(M_, r, n, nullptr);

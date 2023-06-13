@@ -46,7 +46,7 @@ template <class Real> void GreensIdentityTest(Real tol = 1e-10) {
     Vector<Real> Usl, Udl;
     LayerPotential<Laplace2D_FxU>(Usl, disc_lst, Xt, dU0_dn, tol);
     LayerPotential<Laplace2D_DxU>(Udl, disc_lst, Xt, U0, tol);
-    Vector<Real> U = Udl + Usl;
+    Vector<Real> U = Udl - Usl;
     std::cout<<"Error (off-surface) = "<< max_norm(U - Uref) / max_norm(Uref) <<'\n';
   }
 
@@ -54,9 +54,9 @@ template <class Real> void GreensIdentityTest(Real tol = 1e-10) {
     Vector<Real> Usl, Udl;
     LayerPotential<Laplace2D_FxU>(Usl, disc_lst, X, dU0_dn, tol);
     LayerPotential<Laplace2D_DxU>(Udl, disc_lst, X, U0, tol);
-    Vector<Real> E = (Udl + U0*0.5) + Usl - U0;
+    Vector<Real> U = (U0*0.5 + Udl) - Usl;
 
-    std::cout<<"Error (on-surface) = "<< max_norm(E) / max_norm(U0) <<'\n';
+    std::cout<<"Error (on-surface) = "<< max_norm(U - U0) / max_norm(U0) <<'\n';
   }
 }
 
