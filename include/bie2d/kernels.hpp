@@ -136,7 +136,7 @@ namespace sctl {
     template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
       const VecType r2 = r[0]*r[0]+r[1]*r[1];
       const VecType r2inv = (r2 > 0 ? 1/r2 : 0);
-      const VecType log_rinv = 0.5*sctl::log(r2inv);
+      const VecType log_rinv = (r2 > 0 ? -0.5*sctl::log(r2) : 0);
       u[0][0] = log_rinv + r[0]*r[0]*r2inv;
       u[0][1] =            r[0]*r[1]*r2inv;
       u[1][0] =            r[1]*r[0]*r2inv;
