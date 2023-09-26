@@ -57,6 +57,17 @@ namespace sctl {
       }
     }
 
+    void BoundaryIntegralWts(Vector<Real>& W) const {
+      if (W.Dim() != Npanel * Order) W.ReInit(Npanel * Order);
+      for (Long i = 0; i < Npanel; i++) {
+        for (Long j = 0; j < Order; j++) {
+          const Long idx = i*Order+j;
+          W[idx] = dS_[idx] * Wts()[j];
+        }
+      }
+    }
+
+
     template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
@@ -245,50 +256,124 @@ namespace sctl {
         Vector<Vector<Real>> nds_wts(2*Order);
         for (Long i = 0; i < Order; i++) {
           const Integer RefLevels = 2;
-          const Integer LegQuadOrder = Order;
+          constexpr Integer LegQuadOrder = Order;
 
           auto DyadicQuad = [](Vector<Real>& nds, Vector<Real>& wts, const Integer LegQuadOrder, const Real s, const Integer levels, bool sort) {
-            constexpr Integer LogQuadOrder = 16;
+            constexpr Integer LogQuadOrder = 34;
             //const auto& log_quad_nds = LogSingularityQuadRule<Real>(LogQuadOrder).first;
             //const auto& log_quad_wts = LogSingularityQuadRule<Real>(LogQuadOrder).second;
-            const Real log_quad_nds[] = {
-             (Real)2.0514967686824876939e-4L,
-             (Real)1.0941116879700402194e-3L,
-             (Real)4.3764467518801608777e-3L,
-             (Real)1.3129579319567921241e-2L,
-             (Real)3.1319422347023467220e-2L,
-             (Real)6.4282044649094551893e-2L,
-             (Real)1.1747685196991742595e-1L,
-             (Real)1.9517904328816939977e-1L,
-             (Real)2.9080420394081645443e-1L,
-             (Real)4.0548336046512355400e-1L,
-             (Real)5.4163934280979149964e-1L,
-             (Real)6.8903327906975289198e-1L,
-             (Real)8.1096672093024710801e-1L,
-             (Real)8.9441573256030574193e-1L,
-             (Real)9.7374799946956884221e-1L,
-             (Real)9.9888924244762452447e-1L
+            const Real log_quad_nds34[] = {
+              atoreal<Real>("0.99589374098049266697596309872721578E+00"),
+              atoreal<Real>("0.97846047244658663853849870104083622E+00"),
+              atoreal<Real>("0.94748824468677748770114451050673144E+00"),
+              atoreal<Real>("0.90363906555115476011448272204195993E+00"),
+              atoreal<Real>("0.84787483794349543231853699514258199E+00"),
+              atoreal<Real>("0.78145018983210690100654660304172346E+00"),
+              atoreal<Real>("0.70591315487419388110254799805491972E+00"),
+              atoreal<Real>("0.62311128432926166862553990243506078E+00"),
+              atoreal<Real>("0.53520397015870045727005445771481967E+00"),
+              atoreal<Real>("0.44467879105384520085628317016161344E+00"),
+              atoreal<Real>("0.35436312886956254571903857945617996E+00"),
+              atoreal<Real>("0.26741263065759020885765178159167977E+00"),
+              atoreal<Real>("0.18724892011755124045339493437106812E+00"),
+              atoreal<Real>("0.11741781144977654722460870434161616E+00"),
+              atoreal<Real>("0.61353718894321290901407286040266580E-01"),
+              atoreal<Real>("0.22063169692420577829539354877107843E-01"),
+              atoreal<Real>("0.17734943783838474259145370216303788E-02"),
+              atoreal<Real>("0.10813203952530700264242441755928084E-01"),
+              atoreal<Real>("0.40684269193361971594223779345243266E-01"),
+              atoreal<Real>("0.88586268270837482102923525488591479E-01"),
+              atoreal<Real>("0.15181767995905495788844366587415198E+00"),
+              atoreal<Real>("0.22711966623286574096726799862750778E+00"),
+              atoreal<Real>("0.31097640323428139741276424416602541E+00"),
+              atoreal<Real>("0.39988896714993113174924233372761941E+00"),
+              atoreal<Real>("0.49056239170215919019871577607868784E+00"),
+              atoreal<Real>("0.58000439994711341496093553341378493E+00"),
+              atoreal<Real>("0.66555898834864181650937948247918575E+00"),
+              atoreal<Real>("0.74490417999439976027874952548594873E+00"),
+              atoreal<Real>("0.81603709662961469516357114783969153E+00"),
+              atoreal<Real>("0.87725951876587011658872227523155104E+00"),
+              atoreal<Real>("0.92716888895641309301581849572948771E+00"),
+              atoreal<Real>("0.96465486705047101931847993966027589E+00"),
+              atoreal<Real>("0.98889899334050901265469149134829594E+00"),
+              atoreal<Real>("0.99937397236539300005642832208544304E+00")
             };
-            const Real log_quad_wts[] = {
-             (Real)6.4792916533086934623e-4L,
-             (Real)1.2239247035761293717e-3L,
-             (Real)5.9008349675174082927e-3L,
-             (Real)1.2273728802285266544e-2L,
-             (Real)2.5005188361723080279e-2L,
-             (Real)4.1791379511932083369e-2L,
-             (Real)6.5667543912496655405e-2L,
-             (Real)8.8087941085870205392e-2L,
-             (Real)1.0358776334798933346e-1L,
-             (Real)1.2634697527479733119e-1L,
-             (Real)1.4452810601255058206e-1L,
-             (Real)1.4433961886609537948e-1L,
-             (Real)9.2589501060143818582e-2L,
-             (Real)8.7562563835839909214e-2L,
-             (Real)5.7349021984199575159e-2L,
-             (Real)3.0979791076523728382e-3L
+            const Real log_quad_wts34[] = {
+              atoreal<Real>("0.10527015989629867530381828777103869E-01")/2,
+              atoreal<Real>("0.24287035808453484121080804847225055E-01")/2,
+              atoreal<Real>("0.37546502188451407184665558948417978E-01")/2,
+              atoreal<Real>("0.49991470446808202193490030283235742E-01")/2,
+              atoreal<Real>("0.61327889301882068749377963656700249E-01")/2,
+              atoreal<Real>("0.71263500034872754389323369886362529E-01")/2,
+              atoreal<Real>("0.79502853810907992280367954629583594E-01")/2,
+              atoreal<Real>("0.85741280412453331008573909706248727E-01")/2,
+              atoreal<Real>("0.89658988802631161657424723727961569E-01")/2,
+              atoreal<Real>("0.90920015591137141411591029340806841E-01")/2,
+              atoreal<Real>("0.89184404723597223286776198841422607E-01")/2,
+              atoreal<Real>("0.84143999118285015169742128316343244E-01")/2,
+              atoreal<Real>("0.75588491730211133782319674920314119E-01")/2,
+              atoreal<Real>("0.63495965946936024061306150863410387E-01")/2,
+              atoreal<Real>("0.48124910777281996680445229495945482E-01")/2,
+              atoreal<Real>("0.30088721774603493572321646506928115E-01")/2,
+              atoreal<Real>("0.11117071714120635818675390141603161E-01")/2,
+              atoreal<Real>("0.20043859834001163176226329635125052E-01")/2,
+              atoreal<Real>("0.39278268957573892332450140419996636E-01")/2,
+              atoreal<Real>("0.56072599051345180635203539912449369E-01")/2,
+              atoreal<Real>("0.69841590807486564502560060870191172E-01")/2,
+              atoreal<Real>("0.80171744627945581265012118302599718E-01")/2,
+              atoreal<Real>("0.86955461948381084402388351201233661E-01")/2,
+              atoreal<Real>("0.90318922436727576027577437184523573E-01")/2,
+              atoreal<Real>("0.90528728962789270380776106619732628E-01")/2,
+              atoreal<Real>("0.87912714053773823303840228108091299E-01")/2,
+              atoreal<Real>("0.82809745729914426517278218512809409E-01")/2,
+              atoreal<Real>("0.75547075477021100316989955292124314E-01")/2,
+              atoreal<Real>("0.66435870360283354908047968627190078E-01")/2,
+              atoreal<Real>("0.55775266165766421424636826203876866E-01")/2,
+              atoreal<Real>("0.43858410981297792739645541453296435E-01")/2,
+              atoreal<Real>("0.30977161597657852070245070674234555E-01")/2,
+              atoreal<Real>("0.17422913722490842876658619894040446E-01")/2,
+              atoreal<Real>("0.35395471132811402225998935613870556E-02")/2
             };
-            const auto& leg_nds = LegendreQuadRule<Real>(LegQuadOrder).first;
-            const auto& leg_wts = LegendreQuadRule<Real>(LegQuadOrder).second;
+            const Real log_quad_nds16[] = {
+             atoreal<Real>("2.051496768682487693930555255204858e-4"),
+             atoreal<Real>("1.094111687970040219444686100974433e-3"),
+             atoreal<Real>("4.376446751880160877778744403897733e-3"),
+             atoreal<Real>("1.312957931956792124115555363331109e-2"),
+             atoreal<Real>("3.131942234702346722017523520478278e-2"),
+             atoreal<Real>("6.414075003315194736170246864401867e-2"),
+             atoreal<Real>("1.167656676788392962581590955470186e-1"),
+             atoreal<Real>("1.907815000663038947234049372880373e-1"),
+             atoreal<Real>("2.888708401162808885014121988374203e-1"),
+             atoreal<Real>("4.062500000000000000000000000000000e-1"),
+             atoreal<Real>("5.425366345565433699292444290664887e-1"),
+             atoreal<Real>("6.772989490147958863901600197889881e-1"),
+             atoreal<Real>("8.022989490147958863901600197889882e-1"),
+             atoreal<Real>("9.024104783559153001128950056622488e-1"),
+             atoreal<Real>("9.687500000000000000000000000000000e-1"),
+             atoreal<Real>("9.998611553059530655596495295904344e-1")
+            };
+            const Real log_quad_wts16[] = {
+             atoreal<Real>("6.257250862796849297416842333651581e-4"),
+             atoreal<Real>("1.331513954762220548078572444722675e-3"),
+             atoreal<Real>("5.630698641374881532106925242735762e-3"),
+             atoreal<Real>("1.278437652722473355188049324544743e-2"),
+             atoreal<Real>("2.414877914532726019371510435272053e-2"),
+             atoreal<Real>("4.282309343925836415830433385515808e-2"),
+             atoreal<Real>("6.209738255512643155810737848260408e-2"),
+             atoreal<Real>("8.716870408981970882387058469424124e-2"),
+             atoreal<Real>("1.071938042328450559331758423068564e-1"),
+             atoreal<Real>("1.288829470706290078509662292589008e-1"),
+             atoreal<Real>("1.387941899047568600794727699221984e-1"),
+             atoreal<Real>("1.304683663335963765297430962804360e-1"),
+             atoreal<Real>("1.163052762532103408290320175564605e-1"),
+             atoreal<Real>("8.250707132002965824282082732808748e-2"),
+             atoreal<Real>("5.032617692455981053749882887388336e-2"),
+             atoreal<Real>("8.911894521199604701485311922178854e-3")
+            };
+            const auto& log_quad_nds = (LogQuadOrder==16 ? log_quad_nds16 : log_quad_nds34);
+            const auto& log_quad_wts = (LogQuadOrder==16 ? log_quad_wts16 : log_quad_wts34);
+            static const auto& leg_nds = LegQuadRule<Real>::ComputeNds(Order);
+            static const auto& leg_wts = LegQuadRule<Real>::ComputeWts(leg_nds);
 
             Real len0 = std::min(pow<Real>(0.5,levels), std::min(s, (1-s)));
             Real len1 = std::min<Real>(s, 1-s);
@@ -405,7 +490,7 @@ namespace sctl {
       static const Matrix<Real> Minterp2_t = Minterp2.Transpose();
 
       Real min_dist;
-      Integer min_idx;
+      Integer min_idx = 0;
       { // Set min_dist, min_idx
         Real min_dist2 = 0;
         for (Long i = 0; i < Order; i++) {

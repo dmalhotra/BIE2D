@@ -92,6 +92,10 @@ namespace sctl {
     PanelType::BoundaryIntegralDirect(I, F);
   }
 
+  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::BoundaryIntegralWts(Vector<Real>& W) const {
+    PanelType::BoundaryIntegralWts(W);
+  }
+
   template <class Real, Integer Order, Integer digits> template <class KerFn> void Disc<Real,Order,digits>::LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
     PanelType::template LayerPotential<KerFn>(U, Xt, F, tol);
   }
@@ -140,7 +144,19 @@ namespace sctl {
       const Vector<Real> F_(N_, (Iterator<Real>)F.begin() + offset, false);
       disc.BoundaryIntegralDirect(I_, F);
       I += I_;
-      offset += N;
+      offset += N_;
+    }
+  }
+
+  template <class Real, class Disc> void BoundaryIntegralWts(Vector<Real>& W, const Vector<Disc>& disc_lst) {
+    const Long N = NodeCount(disc_lst);
+    if (W.Dim() != N) W.ReInit(N);
+    Long offset = 0;
+    for (const auto& disc : disc_lst) {
+      const Long N_ = disc.NodeCount();
+      Vector<Real> W_(N_, W.begin() + offset, false);
+      disc.BoundaryIntegralWts(W_);
+      offset += N_;
     }
   }
 

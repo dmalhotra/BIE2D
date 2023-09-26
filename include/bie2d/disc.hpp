@@ -85,12 +85,14 @@ namespace sctl {
      */
     void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const;
 
+    void BoundaryIntegralWts(Vector<Real>& W) const;
+
     /**
      * Evaluate the potential at the target points Xt, resulting from the
      * convolution of a kernel function with a surface density F given at the
      * surface discretization nodes.
      */
-    template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol = 1e-10) const;
+    template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const;
 
     /**
      * Return the operator matrix M for the layer potential operator.
@@ -99,7 +101,7 @@ namespace sctl {
      * discretization points, and K0 x K1 is the kernel function dimension (eg.
      * Laplace single-layer is 1x1 and Laplace gradient is 1x2).
      */
-    template <class KerFn> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol = 1e-10) const;
+    template <class KerFn> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol) const;
 
     private:
 
@@ -134,7 +136,7 @@ namespace sctl {
    * convolution of a kernel function with a surface density F given at the
    * surface discretization nodes of all discs in disc_lst.
    */
-  template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol = 1e-10);
+  template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol);
 
   /**
    * Return the operator matrix M for the layer potential operator.
@@ -143,7 +145,7 @@ namespace sctl {
    * discretization points on all discs in disc_lst, and K0 x K1 is the kernel
    * function dimension.
    */
-  template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol = 1e-10);
+  template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol);
 
 }
 
