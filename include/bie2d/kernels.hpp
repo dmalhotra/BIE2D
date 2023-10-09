@@ -166,23 +166,31 @@ namespace sctl {
     }
   };
 
-  // TODO
-  //struct Stokes2D_FxdU_ {
-  //  static const std::string& Name() {
-  //    static const std::string name = "Stokes2D-FxdU";
-  //    return name;
-  //  }
-  //  static constexpr Integer FLOPS() {
-  //    return 0;
-  //  }
-  //  template <class Real> static constexpr Real uKerScaleFactor() {
-  //    static_assert(false, "Not implemented");
-  //    return 0;
-  //  }
-  //  template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][4], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
-  //    static_assert(false, "Not implemented");
-  //  }
-  //};
+  struct Stokes2D_FxT_ {
+    static const std::string& Name() {
+      static const std::string name = "Stokes2D-FxdU";
+      return name;
+    }
+    static constexpr Integer FLOPS() {
+      return 0;
+    }
+    template <class Real> static constexpr Real uKerScaleFactor() {
+      return -1 / const_pi<Real>();
+    }
+    template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][4], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
+      const VecType r2 = r[0]*r[0]+r[1]*r[1];
+      const VecType r2inv = (r2 > 0 ? 1/r2 : 0);
+
+      u[0][0] = r[0]*r[0]*r[0]*r2inv*r2inv;
+      u[0][1] = r[0]*r[0]*r[1]*r2inv*r2inv;
+      u[0][2] = r[0]*r[1]*r[0]*r2inv*r2inv;
+      u[0][3] = r[0]*r[1]*r[1]*r2inv*r2inv;
+      u[1][0] = r[1]*r[0]*r[0]*r2inv*r2inv;
+      u[1][1] = r[1]*r[0]*r[1]*r2inv*r2inv;
+      u[1][2] = r[1]*r[1]*r[0]*r2inv*r2inv;
+      u[1][3] = r[1]*r[1]*r[1]*r2inv*r2inv;
+    }
+  };
 
   using Laplace2D_FxU = GenericKernel2D<Laplace2D_FxU_>;
   using Laplace2D_DxU = GenericKernel2D<Laplace2D_DxU_>;
@@ -190,7 +198,7 @@ namespace sctl {
 
   using Stokes2D_FxU = GenericKernel2D<Stokes2D_FxU_>;
   using Stokes2D_DxU = GenericKernel2D<Stokes2D_DxU_>;
-  //using Stokes2D_FxdU = GenericKernel2D<Stokes2D_FxdU_>; // TODO
+  using Stokes2D_FxT = GenericKernel2D<Stokes2D_FxT_>;
 
 }
 

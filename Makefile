@@ -14,8 +14,9 @@ else
 	CXXFLAGS += -O3 -march=native -DNDEBUG # release build
 endif
 
-ifeq ($(shell uname -s),Darwin)
-	CXXFLAGS += -g -Wl,-no_pie # for stack trace (on Mac)
+OS = $(shell uname -s)
+ifeq "$(OS)" "Darwin"
+	CXXFLAGS += -g -rdynamic -Wl,-no_pie # for stack trace (on Mac)
 else
 	CXXFLAGS += -gdwarf-4 -g -rdynamic # for stack trace -gstrict-dwarf
 endif
@@ -62,6 +63,9 @@ all : $(TARGET_BIN)
 $(BINDIR)/%: $(OBJDIR)/%.o
 	-@$(MKDIRS) $(dir $@)
 	$(CXX) $^ $(LDLIBS) -o $@ $(CXXFLAGS)
+ifeq "$(OS)" "Darwin"
+	/usr/bin/dsymutil $@ -o $@.dSYM
+endif
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	-@$(MKDIRS) $(dir $@)

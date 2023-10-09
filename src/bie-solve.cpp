@@ -29,7 +29,7 @@ template <class Real> void SolveCapacitance(const Vector<Disc<Real>>& disc_lst, 
   ParallelSolver<Real> solver; // Linear solver (GMRES)
   solver(&sigma, BIOp, U0, tol, max_iter);
 
-  // Print total charge on each disk
+  // Print total charge on each disc
   Long offset = 0;
   for (auto& disc : disc_lst) {
     const Long N = disc.NodeCount();
