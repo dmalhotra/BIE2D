@@ -85,7 +85,7 @@ namespace sctl {
      */
     void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const;
 
-    void BoundaryIntegralWts(Vector<Real>& W) const;
+    //void BoundaryIntegralWts(Vector<Real>& W) const;
 
     /**
      * Evaluate the potential at the target points Xt, resulting from the

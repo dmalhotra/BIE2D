@@ -34,7 +34,7 @@ namespace sctl {
         if (SurfWts->Dim() != Npanel*Order) SurfWts->ReInit(Npanel*Order);
         for (Long i = 0; i < Npanel; i++) {
           for (Long j = 0; j < Order; j++) {
-            (*SurfWts)[i] = dS_[i*Order+j] * Wts()[j];
+            (*SurfWts)[i*Order+j] = dS_[i*Order+j] * Wts()[j];
           }
         }
       }
@@ -57,15 +57,15 @@ namespace sctl {
       }
     }
 
-    void BoundaryIntegralWts(Vector<Real>& W) const {
-      if (W.Dim() != Npanel * Order) W.ReInit(Npanel * Order);
-      for (Long i = 0; i < Npanel; i++) {
-        for (Long j = 0; j < Order; j++) {
-          const Long idx = i*Order+j;
-          W[idx] = dS_[idx] * Wts()[j];
-        }
-      }
-    }
+    //void BoundaryIntegralWts(Vector<Real>& W) const {
+    //  if (W.Dim() != Npanel * Order) W.ReInit(Npanel * Order);
+    //  for (Long i = 0; i < Npanel; i++) {
+    //    for (Long j = 0; j < Order; j++) {
+    //      const Long idx = i*Order+j;
+    //      W[idx] = dS_[idx] * Wts()[j];
+    //    }
+    //  }
+    //}
 
 
     template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {

@@ -80,7 +80,7 @@ template <class Real, class Disc> Vector<Real> SolveCapacitance(const Vector<Dis
 
   Vector<Real> sqrt_w, invsqrt_w;
   { // Set sqrt_w, insqrt_w
-    BoundaryIntegralWts(sqrt_w, disc_lst);
+    GetGeom<Real>(disc_lst, nullptr, nullptr, &sqrt_w);
     if (use_sqrtscal) {
       for (auto& w : sqrt_w) w = sqrt<Real>(w);
     } else {
@@ -179,7 +179,7 @@ template <class Real, class Disc> void SolveElastance(const Vector<Disc>& disc_l
 
   Vector<Real> sqrt_w, invsqrt_w;
   { // Set sqrt_w, insqrt_w
-    BoundaryIntegralWts(sqrt_w, disc_lst);
+    GetGeom<Real>(disc_lst, nullptr, nullptr, &sqrt_w);
     if (use_sqrtscal) {
       for (auto& w : sqrt_w) w = sqrt<Real>(w);
     } else {
@@ -196,7 +196,7 @@ template <class Real, class Disc> void SolveElastance(const Vector<Disc>& disc_l
     Long offset = 0;
     for (auto& disc : disc_lst) {
       Vector<Real> W;
-      disc.BoundaryIntegralWts(W);
+      disc.GetGeom(nullptr, nullptr, &W);
       for (Long i = 0; i < W.Dim(); i++) {
         for (Long j = 0; j < W.Dim(); j++) {
           M_bie[offset+i][offset+j] += W[i];
@@ -312,7 +312,7 @@ template <class Real, class Disc> void CapaElasOpMatrix(Matrix<Real>& Kcapa, Mat
 
   Vector<Real> sqrt_w, invsqrt_w;
   { // Set sqrt_w, insqrt_w
-    BoundaryIntegralWts(sqrt_w, disc_lst);
+    GetGeom<Real>(disc_lst, nullptr, nullptr, &sqrt_w);
     if (use_sqrtscal) {
       for (auto& w : sqrt_w) w = sqrt<Real>(w);
     } else {
@@ -337,7 +337,7 @@ template <class Real, class Disc> void CapaElasOpMatrix(Matrix<Real>& Kcapa, Mat
     Long offset = 0;
     for (const auto& disc : disc_lst) {
       Vector<Real> W;
-      disc.BoundaryIntegralWts(W);
+      disc.GetGeom(nullptr, nullptr, &W);
       for (Long i = 0; i < W.Dim(); i++) {
         for (Long j = 0; j < W.Dim(); j++) {
           Kelas[offset+i][offset+j] += W[i];
@@ -455,7 +455,7 @@ template <class Real> class CompressedOperators {
         Vector<Real> Wf_;
         for (const auto& disc : disc_lst) {
           Vector<Real> W;
-          disc.BoundaryIntegralWts(W);
+          disc.GetGeom(nullptr, nullptr, &W);
           for (const auto& w : W) Wf_.PushBack(w);
         }
         SCTL_ASSERT(Wf_.Dim() == Nf);
@@ -898,8 +898,8 @@ template <class Real> Real TestCompressPrecond(const Real R, const Real eps, con
     { // Set Melas[:][N2,N2+1]
       Melas__ = 0;
       Vector<ValueType> W0, W1;
-      disc_lst[0].BoundaryIntegralWts(W0);
-      disc_lst[1].BoundaryIntegralWts(W1);
+      disc_lst[0].GetGeom(nullptr, nullptr, &W0);
+      disc_lst[1].GetGeom(nullptr, nullptr, &W1);
       for (Long i = 0; i < 4*ElemOrder; i++) {
         Melas__[0*ElemOrder+i][N2+0] = W0[i];
         Melas__[4*ElemOrder+i][N2+1] = W1[i];
@@ -1529,7 +1529,7 @@ template <class Real> Matrix<Real> Nds2FourierProj(const DiscList<Real> disc_lst
       Vector<Real> W;
       using DiscType = Disc<Real,ElemOrder>;
       const DiscType disc = DiscType((Real)0, (Real)0, (Real)1, disc_lst.theta0[i], disc_lst.theta1[i]);
-      disc.BoundaryIntegralWts(W);
+      disc.GetGeom(nullptr, nullptr, &W);
 
       Mf1_inv = Mf1.Transpose();
       for (Long j = 0; j < Mf1_inv.Dim(0); j++) {

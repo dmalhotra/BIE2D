@@ -17,7 +17,7 @@ endif
 ifeq ($(shell uname -s),Darwin)
 	CXXFLAGS += -g -Wl,-no_pie # for stack trace (on Mac)
 else
-	CXXFLAGS += -g # for stack trace
+	CXXFLAGS += -gdwarf-4 -g -rdynamic # for stack trace -gstrict-dwarf
 endif
 
 CXXFLAGS += -DSCTL_PROFILE=5 -DSCTL_VERBOSE # Enable profiling

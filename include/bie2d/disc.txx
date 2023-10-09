@@ -92,9 +92,9 @@ namespace sctl {
     PanelType::BoundaryIntegralDirect(I, F);
   }
 
-  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::BoundaryIntegralWts(Vector<Real>& W) const {
-    PanelType::BoundaryIntegralWts(W);
-  }
+  //template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::BoundaryIntegralWts(Vector<Real>& W) const {
+  //  PanelType::BoundaryIntegralWts(W);
+  //}
 
   template <class Real, Integer Order, Integer digits> template <class KerFn> void Disc<Real,Order,digits>::LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
     PanelType::template LayerPotential<KerFn>(U, Xt, F, tol);
@@ -123,8 +123,8 @@ namespace sctl {
       const Long N_ = disc_lst[i].NodeCount();
       Vector<Real> X_((X ? N_*Disc::CoordDim() : 0), (X ? X->begin() + offset*Disc::CoordDim() : NullIterator<Real>()), false);
       Vector<Real> Normal_((Normal ? N_*Disc::CoordDim() : 0), (Normal ? Normal->begin() + offset*Disc::CoordDim() : NullIterator<Real>()), false);
-      Vector<Real> SurfWts_((SurfWts ? N_ : 0), (Normal ? Normal->begin() + offset : NullIterator<Real>()), false);
-      disc_lst[i].GetGeom((X?&X_:nullptr), (Normal?&Normal_:nullptr), (SurfWts?&SurfWts_:nullptr));
+      Vector<Real> SurfWts_((SurfWts ? N_ : 0), (SurfWts ? SurfWts->begin() + offset : NullIterator<Real>()), false);
+      disc_lst[i].GetGeom((X ? &X_ : nullptr), (Normal ? &Normal_ : nullptr), (SurfWts ? &SurfWts_ : nullptr));
       offset += N_;
     }
   }
@@ -148,17 +148,17 @@ namespace sctl {
     }
   }
 
-  template <class Real, class Disc> void BoundaryIntegralWts(Vector<Real>& W, const Vector<Disc>& disc_lst) {
-    const Long N = NodeCount(disc_lst);
-    if (W.Dim() != N) W.ReInit(N);
-    Long offset = 0;
-    for (const auto& disc : disc_lst) {
-      const Long N_ = disc.NodeCount();
-      Vector<Real> W_(N_, W.begin() + offset, false);
-      disc.BoundaryIntegralWts(W_);
-      offset += N_;
-    }
-  }
+  //template <class Real, class Disc> void BoundaryIntegralWts(Vector<Real>& W, const Vector<Disc>& disc_lst) {
+  //  const Long N = NodeCount(disc_lst);
+  //  if (W.Dim() != N) W.ReInit(N);
+  //  Long offset = 0;
+  //  for (const auto& disc : disc_lst) {
+  //    const Long N_ = disc.NodeCount();
+  //    Vector<Real> W_(N_, W.begin() + offset, false);
+  //    disc.BoundaryIntegralWts(W_);
+  //    offset += N_;
+  //  }
+  //}
 
   template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol) {
     const Long Ns = NodeCount(disc_lst);
