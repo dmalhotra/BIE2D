@@ -75,7 +75,7 @@ template <class Real, class Disc> void StokesOpMatrix(Matrix<Real>& K, Matrix<Re
   }
 }
 
-template <class Real> Vector<Real> DiscMobility(const Vector<Real>& F, const Vector<Real>& X, const Real R, const Real tol = 1e-10) {
+template <class Real> Vector<Real> DiscMobilitySolve(const Vector<Real>& F, const Vector<Real>& X, const Real R, const Real tol = 1e-10) {
   const Long Nunif = 32; ////////////
   using DiscType = Disc<Real,ElemOrder>;
   const Long Ndisc = X.Dim() / COORD_DIM;
@@ -163,7 +163,7 @@ int main() {
   }
 
   //for (Long i = 0; i < 1000; i++) {
-    const Vector<Real> V = DiscMobility(F, X, R, tol);
+    const Vector<Real> V = DiscMobilitySolve(F, X, R, tol);
     std::cout<<X;
     std::cout<<V;
     for (Long j = 0; j < Ndisc; j++) {

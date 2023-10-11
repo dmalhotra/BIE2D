@@ -125,21 +125,23 @@ namespace sctl {
       }
     }
 
-    template <class KerFn> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol) const {
+    template <class KerFn> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol, const Long panel_start = 0, const Long panel_end = -1) const {
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
       static_assert(DIM == COORD_DIM, "Coordinate dimension mismatch.");
 
       const Long Nt = Xt.Dim() / COORD_DIM;
-      if (M.Dim(0) != Npanel*Order*KDIM0 || M.Dim(1) != Nt*KDIM1) {
-        M.ReInit(Npanel*Order*KDIM0, Nt*KDIM1);
+      const Long panel_end_ = (panel_end == -1 ? Npanel : panel_end);
+      SCTL_ASSERT(0 <= panel_start && panel_start <= panel_end_ && panel_end_ <= Npanel);
+      if (M.Dim(0) != (panel_end_-panel_start)*Order*KDIM0 || M.Dim(1) != Nt*KDIM1) {
+        M.ReInit((panel_end_-panel_start)*Order*KDIM0, Nt*KDIM1);
       }
 
       #pragma omp parallel for schedule(static)
       for (Long t = 0; t < Nt; t++) {
         const Tensor<Real,false,COORD_DIM> Xt_((Iterator<Real>)Xt.begin()+t*COORD_DIM);
-        for (Long i = 0; i < Npanel; i++) {
+        for (Long i = panel_start; i < panel_end_; i++) {
           Tensor<Real,true,Order,COORD_DIM> XX;
           for (Long j = 0; j < Order; j++) { // Set XX
             for (Integer k = 0; k < COORD_DIM; k++) {
@@ -151,7 +153,7 @@ namespace sctl {
           PanelKernelMatAdap<KerFn>(MM, XX, tol);
           for (Long j = 0; j < Order*KDIM0; j++) {
             for (Long k = 0; k < KDIM1; k++) {
-              M[i*Order*KDIM0+j][t*KDIM1+k] = MM(j, k);
+              M[(i-panel_start)*Order*KDIM0+j][t*KDIM1+k] = MM(j, k);
             }
           }
         }
@@ -246,7 +248,7 @@ namespace sctl {
       static const Vector<Vector<Real>> nds_wts = []() {
         Vector<Vector<Real>> nds_wts(2*Order);
         for (Long i = 0; i < Order; i++) {
-          const Integer RefLevels = 2;
+          const Integer RefLevels = 2; // TODO: this should depend on tol or digits
           constexpr Integer LegQuadOrder = Order;
 
           auto DyadicQuad = [](Vector<Real>& nds, Vector<Real>& wts, const Integer LegQuadOrder, const Real s, const Integer levels, bool sort) {
