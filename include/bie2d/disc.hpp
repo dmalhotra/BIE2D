@@ -10,24 +10,11 @@ namespace sctl {
    * Implements layer potentials on discs. The discs are discretized using
    * Gauss-Legendre panels, where each panel has "Order" nodes.
    */
-  template <class Real, Integer Order = 16, Integer digits = 10> class Disc : private PanelLst<Real,Order,digits,Disc<Real,Order,digits>> {
+  template <class Real, Integer Order = 16, Integer digits = 10> class Disc : public PanelLst<Real,Order,digits,Disc<Real,Order,digits>> {
     using PanelType = PanelLst<Real,Order,digits,Disc<Real,Order,digits>>;
     static constexpr Integer COORD_DIM = PanelType::COORD_DIM;
 
     public:
-
-    static constexpr Integer CoordDim();
-
-    /**
-     * Returns vector of length Order with Gauss-Legendre nodes for the interval (0,1).
-     */
-    static const Vector<Real>& PanelNds();
-
-    /**
-     * Returns vector of length Order with Gauss-Legendre weights for the interval (0,1).
-     */
-    static const Vector<Real>& PanelWts();
-
 
     Disc();
 

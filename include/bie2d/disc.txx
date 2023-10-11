@@ -1,18 +1,5 @@
 namespace sctl {
 
-  template <class Real, Integer Order, Integer digits> constexpr Integer Disc<Real,Order,digits>::CoordDim() {
-    return COORD_DIM;
-  }
-
-  template <class Real, Integer Order, Integer digits> const Vector<Real>& Disc<Real,Order,digits>::PanelNds() {
-    return PanelType::Nds();
-  }
-
-  template <class Real, Integer Order, Integer digits> const Vector<Real>& Disc<Real,Order,digits>::PanelWts() {
-    return PanelType::Wts();
-  }
-
-
   template <class Real, Integer Order, Integer digits> Disc<Real,Order,digits>::Disc() : radius_(0), coord_{0,0} {}
 
   template <class Real, Integer Order, Integer digits> Disc<Real,Order,digits>::Disc(const Real x, const Real y, const Real radius, const long Nunif) {
@@ -38,7 +25,7 @@ namespace sctl {
     theta0_ = theta0;
     theta1_ = theta1;
 
-    const auto& nds = Disc::Nds();
+    const auto& nds = Disc::PanelNds();
     Vector<Real> X(Npanel * Order * COORD_DIM);
     for (Long i = 0; i < Npanel; i++) {
       for (Long j = 0; j < Order; j++) {
@@ -73,14 +60,18 @@ namespace sctl {
   }
 
   template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::GetGeom(Vector<Real>* X, Vector<Real>* Normal, Vector<Real>* SurfWts, Vector<Real>* theta) const {
-    PanelType::GetGeom(X, Normal, SurfWts);
+    //PanelType::GetGeom(X, Normal, SurfWts);
+    if (X) (*X) = PanelType::SurfCoord();
+    if (Normal) (*Normal) = PanelType::SurfNormal();
+    if (SurfWts) (*SurfWts) = PanelType::SurfWts();
+
     if (theta) {
       const Long Npanel = PanelCount();
       if (theta->Dim() != Npanel * Order) theta->ReInit(Npanel * Order);
 
       for (Long i = 0; i < Npanel; i++) {
         for (Long j = 0; j < Order; j++) {
-          (*theta)[i*Order+j] = theta0_[i] + (theta1_[i]-theta0_[i]) * PanelType::Nds()[j];
+          (*theta)[i*Order+j] = theta0_[i] + (theta1_[i]-theta0_[i]) * Disc::PanelNds()[j];
         }
       }
     }

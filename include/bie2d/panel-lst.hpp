@@ -10,11 +10,15 @@ namespace sctl {
 
     public:
 
-    static const Vector<Real>& Nds() {
+    static constexpr Integer CoordDim() {
+      return COORD_DIM;
+    }
+
+    static const Vector<Real>& PanelNds() {
       static const Vector<Real> nds = LegQuadRule<Real>::template nds<Order>();
       return nds;
     }
-    static const Vector<Real>& Wts() {
+    static const Vector<Real>& PanelWts() {
       static const Vector<Real> wts = LegQuadRule<Real>::template wts<Order>();
       return wts;
     }
@@ -23,21 +27,47 @@ namespace sctl {
       Init(X);
     }
 
+    void Init(const Vector<Real>& X) {
+      Npanel = X.Dim() / (Order * COORD_DIM);
+      SCTL_ASSERT(X.Dim() == Npanel * Order * COORD_DIM);
+      if (dX_.Dim() != Npanel*Order*COORD_DIM) dX_.ReInit(Npanel*Order*COORD_DIM);
+      if (Normal_.Dim() != Npanel*Order*COORD_DIM) Normal_.ReInit(Npanel*Order*COORD_DIM);
+      if (SurfWts_.Dim() != Npanel*Order) SurfWts_.ReInit(Npanel*Order);
+
+      X_ = X;
+      for (Long i = 0; i < Npanel; i++) {
+        const Vector<Real> X__(Order * COORD_DIM, X_.begin() + i*Order*COORD_DIM, false);
+        Vector<Real> dX__(Order * COORD_DIM, dX_.begin() + i*Order*COORD_DIM, false);
+        ComputeDerivative(dX__, X__);
+      }
+      for (Long i = 0; i < Npanel; i++) {
+        for (Long j = 0; j < Order; j++) {
+          const Real dx = dX_[(i*Order+j)*COORD_DIM+0];
+          const Real dy = dX_[(i*Order+j)*COORD_DIM+1];
+          const Real dr2 = dx*dx + dy*dy;
+          SCTL_ASSERT(dr2 > 0);
+          const Real dr = sqrt<Real>(dr2);
+          const Real dr_inv = 1/dr;
+
+          SurfWts_[i*Order+j] = dr * PanelWts()[j];
+          Normal_[(i*Order+j)*COORD_DIM+0] =  dy * dr_inv;
+          Normal_[(i*Order+j)*COORD_DIM+1] = -dx * dr_inv;
+        }
+      }
+    }
+
     Long PanelCount() const {
       return Npanel;
     }
 
-    void GetGeom(Vector<Real>* X = nullptr, Vector<Real>* Normal = nullptr, Vector<Real>* SurfWts = nullptr) const {
-      if (X) *X = X_;
-      if (Normal) *Normal = Normal_;
-      if (SurfWts) {
-        if (SurfWts->Dim() != Npanel*Order) SurfWts->ReInit(Npanel*Order);
-        for (Long i = 0; i < Npanel; i++) {
-          for (Long j = 0; j < Order; j++) {
-            (*SurfWts)[i*Order+j] = dS_[i*Order+j] * Wts()[j];
-          }
-        }
-      }
+    const Vector<Real>& SurfCoord() const {
+      return X_;
+    }
+    const Vector<Real>& SurfNormal() const {
+      return Normal_;
+    }
+    const Vector<Real>& SurfWts() const {
+      return SurfWts_;
     }
 
     void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const {
@@ -50,22 +80,12 @@ namespace sctl {
         for (Long i = 0; i < Npanel; i++) {
           for (Long j = 0; j < Order; j++) {
             const Long idx = i*Order+j;
-            I_ += F[idx*dof+k] * dS_[idx] * Wts()[j];
+            I_ += F[idx*dof+k] * SurfWts_[idx];
           }
         }
         I[k] = I_;
       }
     }
-
-    //void BoundaryIntegralWts(Vector<Real>& W) const {
-    //  if (W.Dim() != Npanel * Order) W.ReInit(Npanel * Order);
-    //  for (Long i = 0; i < Npanel; i++) {
-    //    for (Long j = 0; j < Order; j++) {
-    //      const Long idx = i*Order+j;
-    //      W[idx] = dS_[idx] * Wts()[j];
-    //    }
-    //  }
-    //}
 
 
     template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
@@ -138,35 +158,6 @@ namespace sctl {
       }
     }
 
-    void Init(const Vector<Real>& X) {
-      Npanel = X.Dim() / (Order * COORD_DIM);
-      SCTL_ASSERT(X.Dim() == Npanel * Order * COORD_DIM);
-      if (dX_.Dim() != Npanel*Order*COORD_DIM) dX_.ReInit(Npanel*Order*COORD_DIM);
-      if (Normal_.Dim() != Npanel*Order*COORD_DIM) Normal_.ReInit(Npanel*Order*COORD_DIM);
-      if (dS_.Dim() != Npanel*Order) dS_.ReInit(Npanel*Order);
-
-      X_ = X;
-      for (Long i = 0; i < Npanel; i++) {
-        const Vector<Real> X__(Order * COORD_DIM, X_.begin() + i*Order*COORD_DIM, false);
-        Vector<Real> dX__(Order * COORD_DIM, dX_.begin() + i*Order*COORD_DIM, false);
-        ComputeDerivative(dX__, X__);
-      }
-      for (Long i = 0; i < Npanel; i++) {
-        for (Long j = 0; j < Order; j++) {
-          const Real dx = dX_[(i*Order+j)*COORD_DIM+0];
-          const Real dy = dX_[(i*Order+j)*COORD_DIM+1];
-          const Real dr2 = dx*dx + dy*dy;
-          SCTL_ASSERT(dr2 > 0);
-          const Real dr = sqrt<Real>(dr2);
-          const Real dr_inv = 1/dr;
-
-          dS_[i*Order+j] = dr;
-          Normal_[(i*Order+j)*COORD_DIM+0] =  dy * dr_inv;
-          Normal_[(i*Order+j)*COORD_DIM+1] = -dx * dr_inv;
-        }
-      }
-    }
-
     private:
 
     static Matrix<Real> InterpMat(const Vector<Real>& src_nds, const Vector<Real>& trg_nds) {
@@ -183,7 +174,7 @@ namespace sctl {
         for (Long i = 0; i < Order; i++) {
           V[i] = 1;
           Vector<Real> dV(Order, M[i], false);
-          LagrangeInterp<Real>::Derivative(dV, V, Nds());
+          LagrangeInterp<Real>::Derivative(dV, V, PanelNds());
           V[i] = 0;
         }
         return M;
@@ -228,7 +219,7 @@ namespace sctl {
         KerFn::template uKerMatrix<digits,Real>(M_, r, n, nullptr);
         for (Long k0 = 0; k0 < KDIM0; k0++) {
           for (Long k1 = 0; k1 < KDIM1; k1++) {
-            M(i*KDIM0+k0, k1) = M_[k0][k1] * da * Wts()[i] * KerFn::template uKerScaleFactor<Real>();
+            M(i*KDIM0+k0, k1) = M_[k0][k1] * da * PanelWts()[i] * KerFn::template uKerScaleFactor<Real>();
           }
         }
       }
@@ -429,14 +420,14 @@ namespace sctl {
 
           auto& nds = nds_wts[2*i+0];
           auto& wts = nds_wts[2*i+1];
-          DyadicQuad(nds, wts, LegQuadOrder, Nds()[i], RefLevels, false);
+          DyadicQuad(nds, wts, LegQuadOrder, PanelNds()[i], RefLevels, false);
         }
         return nds_wts;
       }();
       static const Vector<Matrix<Real>> interp_mat = []() {
         Vector<Matrix<Real>> interp_mat(2*Order);
         for (Long i = 0; i < Order; i++) {
-          interp_mat[2*i+0] = InterpMat(Nds()-Nds()[i], nds_wts[2*i+0]);
+          interp_mat[2*i+0] = InterpMat(PanelNds()-PanelNds()[i], nds_wts[2*i+0]);
           interp_mat[2*i+1] = interp_mat[2*i+0].Transpose();
         }
         return interp_mat;
@@ -484,8 +475,8 @@ namespace sctl {
       static_assert(CoordVec::template Dim<0>() == Order, "Coordinate vector dimension mismatch");
       static_assert(CoordVec::template Dim<1>() == COORD_DIM, "Coordinate vector dimension mismatch");
 
-      static const Matrix<Real> Minterp1 = InterpMat(Nds(), Nds()*0.5);
-      static const Matrix<Real> Minterp2 = InterpMat(Nds(), Nds()*0.5+0.5);
+      static const Matrix<Real> Minterp1 = InterpMat(PanelNds(), PanelNds()*0.5);
+      static const Matrix<Real> Minterp2 = InterpMat(PanelNds(), PanelNds()*0.5+0.5);
       static const Matrix<Real> Minterp1_t = Minterp1.Transpose();
       static const Matrix<Real> Minterp2_t = Minterp2.Transpose();
 
@@ -547,7 +538,7 @@ namespace sctl {
         Real sum = 0;
         for (Long i = 0; i < Order; i++) {
           const Real da = sqrt<Real>(dX(i,0)*dX(i,0) + dX(i,1)*dX(i,1));
-          sum += da * Wts()[i];
+          sum += da * PanelWts()[i];
         }
         return sum;
       }();
@@ -591,7 +582,7 @@ namespace sctl {
 
     Long Npanel;
     Vector<Real> X_, dX_, Normal_; // Npanel * Order * COORD_DIM
-    Vector<Real> dS_; // Npanel * Order
+    Vector<Real> SurfWts_; // Npanel * Order
 
     friend Derived;
   };
