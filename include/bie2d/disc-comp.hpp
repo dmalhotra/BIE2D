@@ -6,11 +6,11 @@
 
 namespace sctl {
 
-template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLst : public PanelLst<Real,Order,digits,DiscPanelLst<Real,Order,digits>> {
-  using PanelLstType = PanelLst<Real,Order,digits,DiscPanelLst<Real,Order,digits>>;
-  static constexpr Integer COORD_DIM = PanelLstType::COORD_DIM;
+  template <class Real, Integer Order = 16> class DiscPanelLst : public PanelLst<Real,Order> {
+    using PanelLstType = PanelLst<Real,Order>;
+    static constexpr Integer COORD_DIM = PanelLstType::CoordDim();
 
-  public:
+    public:
 
     struct NearData {
       Long disc_idx0, disc_idx1;
@@ -23,6 +23,8 @@ template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLs
      */
     DiscPanelLst(const Comm& comm_ = Comm::Self()) : comm(comm_){}
 
+    virtual ~DiscPanelLst() {}
+
     /**
      * @param[in] Xc coordinates of the center of each disc (length = Ndisc * COORD_DIM)
      *
@@ -34,21 +36,22 @@ template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLs
      * The near panels makes an angle of min(acos(0.5+0.25*far_dist_factor), 2*asin(1/(2+far_dist_factor))).
      */
     void Init(const Vector<Real>& Xc_, const Real R_, bool adap = false, Real far_dist_factor = 1.0) {
+      SCTL_ASSERT(far_dist_factor < 2);
       Xc = Xc_;
       R = R_;
 
       const Long Ndisc = Xc.Dim() / COORD_DIM;
       theta_break.ReInit(Ndisc);
-
-      Long total_panel_count = 0;
-      theta_break_flat.ReInit(total_panel_count);
-      Long offset = 0;
-      for (Long i = 0; i < Ndisc; i++) {
-        Long disc_i_panel_count = 0;
-        theta_break[i].ReInit(disc_i_panel_count, theta_break_flat.begin() + offset, false);
-        offset += disc_i_panel_count;
+      { // Set theta_break_flat, theta_break
+        Long total_panel_count = 0;
+        theta_break_flat.ReInit(total_panel_count);
+        Long offset = 0;
+        for (Long i = 0; i < Ndisc; i++) {
+          Long disc_i_panel_count = 0;
+          theta_break[i].ReInit(disc_i_panel_count, theta_break_flat.begin() + offset, false);
+          offset += disc_i_panel_count;
+        }
       }
-
 
       if (1) { // init 2-disc case for testing
         R = 0.75;
@@ -130,14 +133,19 @@ template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLs
         near_lst[0].panel_idx_range0[1] = 4 + (adap ? 14 : 4);
       }
 
-      { // Init PanelLst
+      { // Init PanelLst, panel_cnt, panel_dsp
         const Long Ndisc = Xc.Dim() / COORD_DIM;
         const Long Npanel = theta_break_flat.Dim();
 
         Long offset = 0;
+        panel_cnt.ReInit(Ndisc);
+        panel_dsp.ReInit(Ndisc);
         Vector<Real> X(Npanel * Order * COORD_DIM);
         for (Long i = 0; i < Ndisc; i++) {
           const Long panel_count = theta_break[i].Dim();
+          panel_cnt[i] = panel_count;
+          panel_dsp[i] = offset;
+
           for (Long j = 0; j < panel_count; j++) {
             const Real theta0 = theta_break[i][j];
             const Real theta1 = (j < panel_count-1 ? theta_break[i][j+1] : theta_break[i][0]+2*const_pi<Real>());
@@ -150,7 +158,6 @@ template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLs
           }
           offset += panel_count;
         }
-        std::cout<<X<<'\n';
         PanelLstType::Init(X);
       }
 
@@ -161,12 +168,20 @@ template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLs
         Long offset = 0;
         for (Long i = 0; i < Ndisc; i++) {
           const Long panel_count = theta_break[i].Dim();
-          X[i].ReInit(panel_count*Order*COORD_DIM, this->X_.begin() + offset*Order*COORD_DIM, false);
-          Normal[i].ReInit(panel_count*Order*COORD_DIM, this->Normal_.begin() + offset*Order*COORD_DIM, false);
-          SurfWts__[i].ReInit(panel_count*Order, this->SurfWts_.begin() + offset*Order, false);
+          X[i].ReInit(panel_count*Order*COORD_DIM, (Iterator<Real>)PanelLstType::SurfCoord().begin() + offset*Order*COORD_DIM, false);
+          Normal[i].ReInit(panel_count*Order*COORD_DIM, (Iterator<Real>)PanelLstType::SurfNormal().begin() + offset*Order*COORD_DIM, false);
+          SurfWts__[i].ReInit(panel_count*Order, (Iterator<Real>)PanelLstType::SurfWts().begin() + offset*Order, false);
           offset += panel_count;
         }
       }
+    }
+
+    Long DiscCount() const {
+      return Xc.Dim() / COORD_DIM;
+    }
+
+    Real DiscRadius() const {
+      return R;
     }
 
     std::tuple<Real,Real> DiscCoord(const Long disc_idx) const {
@@ -175,69 +190,104 @@ template <class Real, Integer Order = 16, Integer digits = 10> class DiscPanelLs
 
     const Vector<Real>& SurfCoord(const Long disc_idx) const {
       SCTL_ASSERT(disc_idx < X.Dim());
-      return (disc_idx < 0 ? this->X_ : X[disc_idx]);
+      return (disc_idx < 0 ? PanelLstType::SurfCoord() : X[disc_idx]);
     }
     const Vector<Real>& SurfNormal(const Long disc_idx) const {
       SCTL_ASSERT(disc_idx < Normal.Dim());
-      return (disc_idx < 0 ? this->Normal_ : Normal[disc_idx]);
+      return (disc_idx < 0 ? PanelLstType::SurfNormal() : Normal[disc_idx]);
     }
     const Vector<Real>& SurfWts(const Long disc_idx) const {
       SCTL_ASSERT(disc_idx < SurfWts__.Dim());
-      return (disc_idx < 0 ? this->SurfWts_ : SurfWts__[disc_idx]);
+      return (disc_idx < 0 ? PanelLstType::SurfWts() : SurfWts__[disc_idx]);
     }
     const Vector<Real>& SurfTheta(const Long disc_idx) const {
       SCTL_ASSERT(disc_idx < theta_break.Dim());
       return (disc_idx < 0 ? theta_break_flat : theta_break[disc_idx]);
     }
 
-    const Vector<NearData>& GetNearLst() {
+    const Vector<NearData>& GetNearLst() const {
       return near_lst;
     }
 
-  private:
+    Long GetPanelIdx(const Long disc_idx, const Long disc_panel_idx) {
+      return panel_dsp[disc_idx] + disc_panel_idx;
+    }
+
+    private:
+
+    Comm comm;
+    Real R;
+    Vector<Real> Xc;
 
     Vector<Real> theta_break_flat;
     Vector<Vector<Real>> X, Normal, SurfWts__, theta_break;
+    Vector<Long> panel_cnt, panel_dsp;
 
     Vector<NearData> near_lst;
+  };
 
-    Vector<Real> Xc;
-    Real R;
+  //template <class Real, class Kernel> class DiscBIOp {
+  //  static constexpr Integer COORD_DIM = Kernel.CoordDim();
+  //  static constexpr Integer KDIM0 = Kernel.SrcDim();
+  //  static constexpr Integer KDIM1 = Kernel.TrgDim();
 
-    Comm comm;
-};
+  //  public:
 
-//template <class Real> class BoundaryIntegralOp {
-//  public:
-//
-//
-//
-//  private:
-//};
+  //  BoundaryIntegral(const Comm comm_) : comm(comm_) {}
+
+  //  template <class PanelLstType> void Setup(const PanelLstType& panel_lst, const Vector<Real>& Xt = Vector<Real>()) {
+  //    X = panel_lst.SurfCoord();
+  //    Xn = panel_lst.SurfNormal();
+  //    wts = panel_lst.SurfWts();
+  //    Y = (Xt.Dim() ? Xt : X);
+  //  }
+
+  //  void EvaluatePotential(Vector<Real>& U, const Vector<Real>& F) const {
+  //    const Long Nt = Y.Dim() / COORD_DIM;
+  //    if (U.Dim() !=)
+  //  }
+
+  //  private:
+
+  //  Comm comm;
+  //  Vector<Real> X, Xn, wts; // src
+  //  Vector<Real> Y; // trg
+  //};
 
 
-template <class Real> class ICIP {
-  public:
+  template <class Real, Integer Order, class Derived> class ICIP {
+    static constexpr Integer COORD_DIM = 2;
 
-    ICIP();
+    public:
 
-    void Setup(const Vector<Real>& Xc, const Real R, bool icip = true);
+    ICIP(const Comm& comm_ = Comm::Self()) : comm(comm_) {}
 
-  private:
+    void Setup(const Vector<Real>& Xc, const Real R, bool icip = true) {
+      disc_panels.Init(Xc, R, !icip);
+    }
+
+    private:
 
     virtual void BuildPrecomp() = 0;
-};
 
-/**
- * Solve the Stokes mobility boundary integral equation.
- */
-template <class Real> class DiscMobility {
-  static constexpr Integer COORD_DIM = 2;
-  public:
+    Comm comm;
+    DiscPanelLst<Real,Order> disc_panels;
+  };
+
+  /**
+   * Solve the Stokes mobility boundary integral equation.
+   */
+  template <class Real, Integer Order = 16> class DiscMobility : public ICIP<Real,Order,DiscMobility<Real,Order>> {
+    using ICIPType = ICIP<Real,Order,DiscMobility<Real,Order>>;
+    static constexpr Integer COORD_DIM = ICIPType::COORD_DIM;
+
+    public:
 
     DiscMobility(const Comm& comm = Comm::Self());
 
-    //void Setup(const Vector<Real>& Xc, const Real R, bool icip = true);
+    void Setup(const Vector<Real>& Xc, const Real R, bool icip = true) {
+      ICIPType::Setup(Xc, R, icip);
+    }
 
     /**
      * @param[out] V velocity and angular velocity of each disc (length= = Nx3).
@@ -248,7 +298,7 @@ template <class Real> class DiscMobility {
      */
     void SolveMobility(Vector<Real> V, const Vector<Real> F, const Vector<Real> Vs = Vector<Real>());
 
-  private:
+    private:
 
     virtual void BuildPrecomp(const Real R, const Long InterpOrder, const Real d_min, const Real d_max) {
       Vector<Real> Xc(2*COORD_DIM);
@@ -267,9 +317,9 @@ template <class Real> class DiscMobility {
     }
 
     Comm comm;
-    DiscPanelLst<Real> panel_lst;
+    //BoundaryIntegral<Real,>
     //NearCorrection<Real> near_correction; // stores the near quadrature corrections and the compressed near interactions
-};
+  };
 
 
 }

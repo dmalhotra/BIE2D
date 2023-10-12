@@ -12,8 +12,19 @@ template <class Real> void SolveCapacitance(const Vector<Disc<Real>>& disc_lst, 
   // Setup boundary integral operator: K = 1/2 + D + S (exterior limit)
   auto BIOp = [&disc_lst,&Xt,&tol](Vector<Real>* Ax, const Vector<Real>& x) {
     Vector<Real> Usl, Udl;
-    LayerPotential<KerSL>(Usl, disc_lst, Xt, x, tol);
-    LayerPotential<KerDL>(Udl, disc_lst, Xt, x, tol);
+    {
+      Matrix<Real> Msl, Mdl;
+      LayerPotentialMatrix<KerSL>(Msl, disc_lst, Xt, tol);
+      LayerPotentialMatrix<KerDL>(Mdl, disc_lst, Xt, tol);
+
+      Usl.ReInit(Msl.Dim(1));
+      Udl.ReInit(Mdl.Dim(1));
+      Matrix<Real> Usl_(1, Usl.Dim(), Usl.begin(), false);
+      Matrix<Real> Udl_(1, Udl.Dim(), Udl.begin(), false);
+      const Matrix<Real> x_(1, x.Dim(), (Iterator<Real>)x.begin(), false);
+      Usl_ = x_ * Msl;
+      Udl_ = x_ * Mdl;
+    }
     (*Ax) = 0.5*x + Udl + Usl;
   };
 

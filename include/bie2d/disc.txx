@@ -1,8 +1,8 @@
 namespace sctl {
 
-  template <class Real, Integer Order, Integer digits> Disc<Real,Order,digits>::Disc() : radius_(0), coord_{0,0} {}
+  template <class Real, Integer Order> Disc<Real,Order>::Disc() : radius_(0), coord_{0,0} {}
 
-  template <class Real, Integer Order, Integer digits> Disc<Real,Order,digits>::Disc(const Real x, const Real y, const Real radius, const long Nunif) {
+  template <class Real, Integer Order> Disc<Real,Order>::Disc(const Real x, const Real y, const Real radius, const long Nunif) {
     Vector<Real> theta0, theta1;
     for (Long i = 0; i < Nunif; i++) {
       theta0.PushBack(2*const_pi<Real>()*(i+0)/Nunif);
@@ -11,11 +11,11 @@ namespace sctl {
     Init(x, y, radius, theta0, theta1);
   }
 
-  template <class Real, Integer Order, Integer digits> Disc<Real,Order,digits>::Disc(const Real x, const Real y, const Real radius, const Vector<Real>& theta0, const Vector<Real>& theta1) {
+  template <class Real, Integer Order> Disc<Real,Order>::Disc(const Real x, const Real y, const Real radius, const Vector<Real>& theta0, const Vector<Real>& theta1) {
     Init(x, y, radius, theta0, theta1);
   }
 
-  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::Init(const Real x, const Real y, const Real radius, const Vector<Real>& theta0, const Vector<Real>& theta1) {
+  template <class Real, Integer Order> void Disc<Real,Order>::Init(const Real x, const Real y, const Real radius, const Vector<Real>& theta0, const Vector<Real>& theta1) {
     const Long Npanel = theta0.Dim();
     SCTL_ASSERT((Long)theta1.Dim() == Npanel);
 
@@ -39,27 +39,27 @@ namespace sctl {
 
 
 
-  template <class Real, Integer Order, Integer digits> Real Disc<Real,Order,digits>::Radius() const {
+  template <class Real, Integer Order> Real Disc<Real,Order>::Radius() const {
     return radius_;
   }
 
-  template <class Real, Integer Order, Integer digits> Real Disc<Real,Order,digits>::Coord(int i) const {
+  template <class Real, Integer Order> Real Disc<Real,Order>::Coord(int i) const {
     return coord_[i];
   }
 
-  template <class Real, Integer Order, Integer digits> Long Disc<Real,Order,digits>::PanelCount() const {
+  template <class Real, Integer Order> Long Disc<Real,Order>::PanelCount() const {
     return theta0_.Dim();
   }
 
-  template <class Real, Integer Order, Integer digits> Long Disc<Real,Order,digits>::NodeCount() const {
+  template <class Real, Integer Order> Long Disc<Real,Order>::NodeCount() const {
     return PanelCount() * Order;
   }
 
-  template <class Real, Integer Order, Integer digits> std::pair<Real,Real> Disc<Real,Order,digits>::PanelRange(Long idx) const {
+  template <class Real, Integer Order> std::pair<Real,Real> Disc<Real,Order>::PanelRange(Long idx) const {
     return std::make_pair<Real,Real>(theta0_[idx], theta1_[idx]);
   }
 
-  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::GetGeom(Vector<Real>* X, Vector<Real>* Normal, Vector<Real>* SurfWts, Vector<Real>* theta) const {
+  template <class Real, Integer Order> void Disc<Real,Order>::GetGeom(Vector<Real>* X, Vector<Real>* Normal, Vector<Real>* SurfWts, Vector<Real>* theta) const {
     //PanelType::GetGeom(X, Normal, SurfWts);
     if (X) (*X) = PanelType::SurfCoord();
     if (Normal) (*Normal) = PanelType::SurfNormal();
@@ -79,19 +79,19 @@ namespace sctl {
 
 
 
-  template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const {
+  template <class Real, Integer Order> void Disc<Real,Order>::BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const {
     PanelType::BoundaryIntegralDirect(I, F);
   }
 
-  //template <class Real, Integer Order, Integer digits> void Disc<Real,Order,digits>::BoundaryIntegralWts(Vector<Real>& W) const {
+  //template <class Real, Integer Order> void Disc<Real,Order>::BoundaryIntegralWts(Vector<Real>& W) const {
   //  PanelType::BoundaryIntegralWts(W);
   //}
 
-  template <class Real, Integer Order, Integer digits> template <class KerFn> void Disc<Real,Order,digits>::LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
-    PanelType::template LayerPotential<KerFn>(U, Xt, F, tol);
-  }
+  //template <class Real, Integer Order> template <class KerFn> void Disc<Real,Order>::LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
+  //  PanelType::template LayerPotential<KerFn>(U, Xt, F, tol);
+  //}
 
-  template <class Real, Integer Order, Integer digits> template <class KerFn> void Disc<Real,Order,digits>::LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol) const {
+  template <class Real, Integer Order> template <class KerFn> void Disc<Real,Order>::LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol) const {
     PanelType::template LayerPotentialMatrix<KerFn>(M, Xt, tol);
   }
 
@@ -151,6 +151,32 @@ namespace sctl {
   //  }
   //}
 
+  //template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) {
+  //  const Long Ns = NodeCount(disc_lst);
+  //  const Long Nt = Xt.Dim() / KerFn::CoordDim();
+  //  SCTL_ASSERT(Xt.Dim() == Nt * KerFn::CoordDim());
+  //  SCTL_ASSERT(F.Dim() == Ns * KerFn::SrcDim());
+
+  //  if (U.Dim() != Nt * KerFn::TrgDim()) U.ReInit(Nt * KerFn::TrgDim());
+  //  Vector<Real> U_(Nt * KerFn::TrgDim());
+  //  U_ = 0;
+  //  U = 0;
+
+  //  Long src_offset = 0;
+  //  for (const auto& disc : disc_lst) {
+  //    const Long Ns_ = disc.NodeCount() * KerFn::SrcDim();
+  //    const Vector<Real> F_(Ns_, (Iterator<Real>)F.begin() + src_offset, false);
+  //    disc.template LayerPotential<KerFn>(U_, Xt, F_, tol);
+  //    U += U_;
+  //    src_offset += Ns_;
+  //  }
+
+  //  //Matrix<Real> M;
+  //  //LayerPotentialMatrix<Real,KerFn>(M, disc_lst, Xt, tol);
+  //  //Matrix<Real> U_ = Matrix<Real>(1, F.Dim(), (Iterator<Real>)F.begin(), false) * M;
+  //  //U = Vector<Real>(U_.Dim(1), U_.begin(), false);
+  //}
+
   template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol) {
     const Long Ns = NodeCount(disc_lst);
     const Long Nt = Xt.Dim() / KerFn::CoordDim();
@@ -167,32 +193,6 @@ namespace sctl {
       disc.template LayerPotentialMatrix<KerFn>(M_, Xt, tol);
       src_offset += Ns_;
     }
-  }
-
-  template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) {
-    const Long Ns = NodeCount(disc_lst);
-    const Long Nt = Xt.Dim() / KerFn::CoordDim();
-    SCTL_ASSERT(Xt.Dim() == Nt * KerFn::CoordDim());
-    SCTL_ASSERT(F.Dim() == Ns * KerFn::SrcDim());
-
-    if (U.Dim() != Nt * KerFn::TrgDim()) U.ReInit(Nt * KerFn::TrgDim());
-    Vector<Real> U_(Nt * KerFn::TrgDim());
-    U_ = 0;
-    U = 0;
-
-    Long src_offset = 0;
-    for (const auto& disc : disc_lst) {
-      const Long Ns_ = disc.NodeCount() * KerFn::SrcDim();
-      const Vector<Real> F_(Ns_, (Iterator<Real>)F.begin() + src_offset, false);
-      disc.template LayerPotential<KerFn>(U_, Xt, F_, tol);
-      U += U_;
-      src_offset += Ns_;
-    }
-
-    //Matrix<Real> M;
-    //LayerPotentialMatrix<Real,KerFn>(M, disc_lst, Xt, tol);
-    //Matrix<Real> U_ = Matrix<Real>(1, F.Dim(), (Iterator<Real>)F.begin(), false) * M;
-    //U = Vector<Real>(U_.Dim(1), U_.begin(), false);
   }
 
 }

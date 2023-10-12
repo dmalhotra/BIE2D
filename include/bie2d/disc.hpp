@@ -10,9 +10,9 @@ namespace sctl {
    * Implements layer potentials on discs. The discs are discretized using
    * Gauss-Legendre panels, where each panel has "Order" nodes.
    */
-  template <class Real, Integer Order = 16, Integer digits = 10> class Disc : public PanelLst<Real,Order,digits,Disc<Real,Order,digits>> {
-    using PanelType = PanelLst<Real,Order,digits,Disc<Real,Order,digits>>;
-    static constexpr Integer COORD_DIM = PanelType::COORD_DIM;
+  template <class Real, Integer Order = 16> class Disc : public PanelLst<Real,Order> {
+    using PanelType = PanelLst<Real,Order>;
+    static constexpr Integer COORD_DIM = PanelType::CoordDim();
 
     public:
 
@@ -74,12 +74,12 @@ namespace sctl {
 
     //void BoundaryIntegralWts(Vector<Real>& W) const;
 
-    /**
-     * Evaluate the potential at the target points Xt, resulting from the
-     * convolution of a kernel function with a surface density F given at the
-     * surface discretization nodes.
-     */
-    template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const;
+    ///**
+    // * Evaluate the potential at the target points Xt, resulting from the
+    // * convolution of a kernel function with a surface density F given at the
+    // * surface discretization nodes.
+    // */
+    //template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const;
 
     /**
      * Return the operator matrix M for the layer potential operator.
@@ -118,12 +118,12 @@ namespace sctl {
    */
   template <class Real, class Disc> void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Disc>& disc_lst, const Vector<Real>& F);
 
-  /**
-   * Evaluate the potential at the target points Xt, resulting from the
-   * convolution of a kernel function with a surface density F given at the
-   * surface discretization nodes of all discs in disc_lst.
-   */
-  template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol);
+  ///**
+  // * Evaluate the potential at the target points Xt, resulting from the
+  // * convolution of a kernel function with a surface density F given at the
+  // * surface discretization nodes of all discs in disc_lst.
+  // */
+  //template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol);
 
   /**
    * Return the operator matrix M for the layer potential operator.
@@ -132,7 +132,7 @@ namespace sctl {
    * discretization points on all discs in disc_lst, and K0 x K1 is the kernel
    * function dimension.
    */
-  template <class KerFn, class Real, class Disc> void LayerPotential(Vector<Real>& U, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol);
+  template <class KerFn, class Real, class Disc> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Disc>& disc_lst, const Vector<Real>& Xt, const Real tol);
 
 }
 

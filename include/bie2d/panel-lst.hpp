@@ -5,13 +5,16 @@
 
 namespace sctl {
 
-  template <class Real, Integer Order, Integer digits, class Derived> class PanelLst {
+  template <class Real, Integer Order> class PanelLst : public ElementListBase<Real> {
     static constexpr Integer COORD_DIM = 2;
 
     public:
 
     static constexpr Integer CoordDim() {
       return COORD_DIM;
+    }
+    static constexpr Integer ElemOrder() {
+      return Order;
     }
 
     static const Vector<Real>& PanelNds() {
@@ -22,6 +25,8 @@ namespace sctl {
       static const Vector<Real> wts = LegQuadRule<Real>::template wts<Order>();
       return wts;
     }
+
+    virtual ~PanelLst() {}
 
     PanelLst(const Vector<Real>& X = Vector<Real>()) {
       Init(X);
@@ -56,7 +61,10 @@ namespace sctl {
       }
     }
 
-    Long PanelCount() const {
+    /**
+     * Return the number of elements in the list.
+     */
+    virtual Long Size() const {
       return Npanel;
     }
 
@@ -70,9 +78,13 @@ namespace sctl {
       return SurfWts_;
     }
 
-    void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F) const {
-      const Long dof = F.Dim() / (Npanel * Order);
-      SCTL_ASSERT(F.Dim() == Npanel * Order * dof);
+    void BoundaryIntegralDirect(Vector<Real>& I, const Vector<Real>& F, const Long panel_start = 0, const Long panel_end = -1) const {
+      const Long panel_end_ = (panel_end == -1 ? Npanel : panel_end);
+      SCTL_ASSERT(0 <= panel_start && panel_start <= panel_end_ && panel_end_ <= Npanel);
+      const Long Npanel_ = panel_end_ - panel_start;
+
+      const Long dof = F.Dim() / (Npanel_ * Order);
+      SCTL_ASSERT(F.Dim() == Npanel_ * Order * dof);
 
       if (I.Dim() != dof) I.ReInit(dof);
       for (Long k = 0; k < dof; k++) {
@@ -87,45 +99,7 @@ namespace sctl {
       }
     }
 
-
-    template <class KerFn> void LayerPotential(Vector<Real>& U, const Vector<Real>& Xt, const Vector<Real>& F, const Real tol) const {
-      static constexpr Integer DIM   = KerFn::CoordDim();
-      static constexpr Integer KDIM0 = KerFn::SrcDim();
-      static constexpr Integer KDIM1 = KerFn::TrgDim();
-      SCTL_ASSERT(F.Dim() == Npanel * Order * KDIM0);
-      static_assert(DIM == COORD_DIM, "Coordinate dimension mismatch.");
-
-      const Long Nt = Xt.Dim() / COORD_DIM;
-      if (U.Dim() != Nt * KDIM1) U.ReInit(Nt * KDIM1);
-
-      #pragma omp parallel for schedule(static)
-      for (Long t = 0; t < Nt; t++) {
-        const Tensor<Real,false,COORD_DIM> Xt_((Iterator<Real>)Xt.begin()+t*COORD_DIM);
-        Tensor<Real,false,KDIM1> UU(U.begin() + t*KDIM1);
-        UU = (Real)0;
-
-        for (Long i = 0; i < Npanel; i++) {
-          Tensor<Real,true,Order,COORD_DIM> XX;
-          for (Long j = 0; j < Order; j++) { // Set XX
-            for (Integer k = 0; k < COORD_DIM; k++) {
-              XX(j,k) = X_[(i*Order+j)*COORD_DIM+k] - Xt_(k);
-            }
-          }
-
-          Tensor<Real,true,Order*KDIM0,KDIM1> MM;
-          PanelKernelMatAdap<KerFn>(MM, XX, tol);
-
-          const Tensor<Real,false,Order*KDIM0> FF((Iterator<Real>)F.begin() + i*Order*KDIM0);
-          for (Integer k0 = 0; k0 < Order*KDIM0; k0++) {
-            for (Integer k1 = 0; k1 < KDIM1; k1++) {
-              UU(k1) += FF(k0) * MM(k0,k1);
-            }
-          }
-        }
-      }
-    }
-
-    template <class KerFn> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol, const Long panel_start = 0, const Long panel_end = -1) const {
+    template <class KerFn, Integer digits = 10> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol, const Long panel_start = 0, const Long panel_end = -1) const {
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
@@ -134,8 +108,10 @@ namespace sctl {
       const Long Nt = Xt.Dim() / COORD_DIM;
       const Long panel_end_ = (panel_end == -1 ? Npanel : panel_end);
       SCTL_ASSERT(0 <= panel_start && panel_start <= panel_end_ && panel_end_ <= Npanel);
-      if (M.Dim(0) != (panel_end_-panel_start)*Order*KDIM0 || M.Dim(1) != Nt*KDIM1) {
-        M.ReInit((panel_end_-panel_start)*Order*KDIM0, Nt*KDIM1);
+      const Long Npanel_ = panel_end_ - panel_start;
+
+      if (M.Dim(0) != Npanel_*Order*KDIM0 || M.Dim(1) != Nt*KDIM1) {
+        M.ReInit(Npanel_*Order*KDIM0, Nt*KDIM1);
       }
 
       #pragma omp parallel for schedule(static)
@@ -150,7 +126,7 @@ namespace sctl {
           }
 
           Tensor<Real,true,Order*KDIM0,KDIM1> MM;
-          PanelKernelMatAdap<KerFn>(MM, XX, tol);
+          PanelKernelMatAdap<KerFn,digits>(MM, XX, tol);
           for (Long j = 0; j < Order*KDIM0; j++) {
             for (Long k = 0; k < KDIM1; k++) {
               M[(i-panel_start)*Order*KDIM0+j][t*KDIM1+k] = MM(j, k);
@@ -158,6 +134,169 @@ namespace sctl {
           }
         }
       }
+    }
+
+
+
+
+
+
+
+
+
+    /**
+     * Returns the position and normals of the surface nodal points for each
+     * element.
+     *
+     * @param[out] X the position of the node points in array-of-struct
+     * order: {x_1, y_1, z_1, x_2, ..., x_n, y_n, z_n}
+     *
+     * @param[out] Xn the normal vectors of the node points in
+     * array-of-struct order: {nx_1, ny_1, nz_1, nx_2, ..., nx_n, ny_n, nz_n}
+     *
+     * @param[out] element_wise_node_cnt the number of node points
+     * belonging to each element.
+     */
+    virtual void GetNodeCoord(Vector<Real>* X, Vector<Real>* Xn, Vector<Long>* element_wise_node_cnt) const {
+      if (X) (*X) = X_;
+      if (Xn) (*Xn) = Normal_;
+      if (element_wise_node_cnt) {
+        if (element_wise_node_cnt->Dim() != Size()) element_wise_node_cnt->ReInit(Size());
+        for (Long i = 0; i < Size(); i++) element_wise_node_cnt[0][i] = Order;
+      }
+    }
+
+    /**
+     * Given an accuracy tolerance, returns the quadrature node positions,
+     * the normals at the nodes, the weights and the cut-off distance from
+     * the nodes for computing the far-field potential from the surface (at
+     * target points beyond the cut-off distance).
+     *
+     * @param[out] X the position of the quadrature node points in
+     * array-of-struct order: {x_1, y_1, z_1, x_2, ..., x_n, y_n, z_n}
+     *
+     * @param[out] Xn the normal vectors at the quadrature node points in
+     * array-of-struct order: {nx_1, ny_1, nz_1, nx_2, ..., nx_n, ny_n, nz_n}
+     *
+     * @param[out] wts the weights corresponding to each quadrature node.
+     *
+     * @param[out] dist_far the cut-off distance from each quadrature node
+     * such that quadrature rule will be accurate to the specified tolerance
+     * for target points further away than this distance.
+     *
+     * @param[out] element_wise_node_cnt the number of quadrature node
+     * points belonging to each element.
+     *
+     * @param[in] tol the accuracy tolerance.
+     */
+    virtual void GetFarFieldNodes(Vector<Real>& X, Vector<Real>& Xn, Vector<Real>& wts, Vector<Real>& dist_far, Vector<Long>& element_wise_node_cnt, const Real tol) const {
+      X = X_;
+      Xn = Normal_;
+      wts = SurfWts_;
+      if (element_wise_node_cnt.Dim() != Size()) element_wise_node_cnt.ReInit(Size());
+      for (Long i = 0; i < Size(); i++) element_wise_node_cnt[i] = Order;
+
+      Vector<Real> dist_far_gauss(Order);
+      for (Long i = 0; i < Order; i++) { // Set dist_far_gauss
+        const Real rho=pow<Real>((64/(15*tol)), (1/(Real)(2*Order)));
+        const Real a = (rho-1/rho)/4;
+        const Real b = (rho+1/rho)/4;
+        const Real c = 0.5;
+
+        dist_far_gauss[i] = b - fabs(PanelNds()[i]-0.5);
+        const Real cos_t = b * (PanelNds()[i]-0.5) / (c*c);
+        if (fabs(cos_t) <= 1) dist_far_gauss[i] = a * sqrt<Real>(1 + ((a*a)/(b*b)-1) * cos_t*cos_t);
+      }
+
+      if (dist_far.Dim() != Size()*Order) dist_far.ReInit(Size()*Order);
+      for (Long i = 0 ; i < Size(); i++) {
+        for (Long j = 0; j < Order; j++) {
+          const Long node_idx = i * Order + j;
+          Real dxds = sqrt<Real>(dX_[node_idx*COORD_DIM+0]*dX_[node_idx*COORD_DIM+0] + dX_[node_idx*COORD_DIM+1]*dX_[node_idx*COORD_DIM+1]);
+          dist_far[node_idx] = dist_far_gauss[j] * dxds;
+        }
+      }
+    }
+
+    /**
+     * Interpolates the density from surface node points to far-field
+     * quadrature node points.
+     *
+     * @param[out] Fout the interpolated density at far-field quadrature
+     * nodes in array-of-struct order.
+     *
+     * @param[in] Fin the input density at surface node points in
+     * array-of-struct order.
+     */
+    virtual void GetFarFieldDensity(Vector<Real>& Fout, const Vector<Real>& Fin) const {
+      Fout = Fin;
+    }
+
+    /**
+     * Apply the transpose of the GetFarFieldDensity() operator for a single
+     * element applied to the column-vectors of Min and the result is
+     * returned in Mout.
+     *
+     * @param[out] Mout the output matrix where the column-vectors are the
+     * result of the application of the transpose operator.
+     *
+     * @param[in] Min the input matrix whose column-vectors are
+     * multiplied by the transpose operator.
+     *
+     * @param[in] elem_idx the index of the element.
+     */
+    virtual void FarFieldDensityOperatorTranspose(Matrix<Real>& Mout, const Matrix<Real>& Min, const Long elem_idx) const {
+      Mout = Min;
+    }
+
+    /**
+     * Compute self-interaction operator for each element.
+     *
+     * @param[out] M_lst the vector of all self-interaction matrices
+     * (in row-major format).
+     *
+     * @param[in] ker the kernel object.
+     *
+     * @param[in] tol the accuracy tolerance.
+     *
+     * @param[in] trg_dot_prod whether to compute dot product of the potential with the target-normal vector.
+     *
+     * @param[in] self pointer to element-list object.
+     */
+    template <class Kernel> static void SelfInterac(Vector<Matrix<Real>>& M_lst, const Kernel& ker, Real tol, bool trg_dot_prod, const ElementListBase<Real>* self) {
+      const auto& panel_lst = *dynamic_cast<const PanelLst*>(self);
+      const Long Npanel = panel_lst.Size();
+      SCTL_ASSERT(!trg_dot_prod);
+
+      if (M_lst.Dim() != Npanel) M_lst.ReInit(Npanel);
+      for (Long i = 0; i < Npanel; i++) {
+        const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+        panel_lst.template LayerPotentialMatrix<Kernel>(M_lst[i], Xt, tol, i, i+1);
+      }
+    }
+
+    /**
+     * Compute near-interaction operator for a given element-idx and each each target.
+     *
+     * @param[out] M the near-interaction matrix (in row-major format).
+     *
+     * @param[in] Xt the position of the target points in array-of-structure
+     * order: {x_1, y_1, z_1, x_2, ..., x_n, y_n, z_n}
+     *
+     * @param[in] normal_trg the normal at the target points in array-of-structure
+     * order: {nx_1, ny_1, nz_1, nx_2, ..., nx_n, ny_n, nz_n}
+     *
+     * @param[in] ker the kernel object.
+     *
+     * @param[in] tol the accuracy tolerance.
+     *
+     * @param[in] elem_idx the index of the source element.
+     *
+     * @param[in] self pointer to element-list object.
+     */
+    template <class Kernel> static void NearInterac(Matrix<Real>& M, const Vector<Real>& Xt, const Vector<Real>& normal_trg, const Kernel& ker, Real tol, const Long elem_idx, const ElementListBase<Real>* self) {
+      const auto& panel_lst = *dynamic_cast<const PanelLst*>(self);
+      panel_lst.template LayerPotentialMatrix<Kernel>(M, Xt, tol, elem_idx, elem_idx+1);
     }
 
     private:
@@ -192,7 +331,7 @@ namespace sctl {
       Matrix<Real>::GEMM(dY_, Mt, Y_);
     }
 
-    template <class KerFn, class Mat, class CoordVec> static void PanelKernelMat(Mat& M, const CoordVec& Xs) { // assume Xt = 0
+    template <class KerFn, Integer digits, class Mat, class CoordVec> static void PanelKernelMat(Mat& M, const CoordVec& Xs) { // assume Xt = 0
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
@@ -211,23 +350,24 @@ namespace sctl {
       }
 
       for (Long i = 0; i < Order; i++) {
-        const Real r[2] = {-Xs(i,0), -Xs(i,1)};
+        using VecType = Vec<Real,1>; // TODO: vectorize
+        const VecType r[2] = {-Xs(i,0), -Xs(i,1)};
         const Real dx[2] = {dXs(i,0), dXs(i,1)};
         const Real da = sqrt<Real>(dx[0]*dx[0] + dx[1]*dx[1]);
         const Real da_inv = 1/da;
-        const Real n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
+        const VecType n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
 
-        Real M_[KDIM0][KDIM1];
-        KerFn::template uKerMatrix<digits,Real>(M_, r, n, nullptr);
+        VecType M_[KDIM0][KDIM1];
+        KerFn::template uKerMatrix<digits>(M_, r, n, nullptr);
         for (Long k0 = 0; k0 < KDIM0; k0++) {
           for (Long k1 = 0; k1 < KDIM1; k1++) {
-            M(i*KDIM0+k0, k1) = M_[k0][k1] * da * PanelWts()[i] * KerFn::template uKerScaleFactor<Real>();
+            M(i*KDIM0+k0, k1) = M_[k0][k1][0] * da * PanelWts()[i] * KerFn::template uKerScaleFactor<Real>();
           }
         }
       }
     }
 
-    template <class KerFn, class Mat, class CoordVec> static void PanelKernelMatSing(Mat& M, const CoordVec& Xs, const Integer idx, const Real tol) { // assume Xt = 0
+    template <class KerFn, Integer digits, class Mat, class CoordVec> static void PanelKernelMatSing(Mat& M, const CoordVec& Xs, const Integer idx, const Real tol) { // assume Xt = 0
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
@@ -248,7 +388,7 @@ namespace sctl {
       static const Vector<Vector<Real>> nds_wts = []() {
         Vector<Vector<Real>> nds_wts(2*Order);
         for (Long i = 0; i < Order; i++) {
-          const Integer RefLevels = 2; // TODO: this should depend on tol or digits
+          const Integer RefLevels = 4; // TODO: this should depend on tol or digits
           constexpr Integer LegQuadOrder = Order;
 
           auto DyadicQuad = [](Vector<Real>& nds, Vector<Real>& wts, const Integer LegQuadOrder, const Real s, const Integer levels, bool sort) {
@@ -447,17 +587,18 @@ namespace sctl {
 
       Matrix<Real> MM(Nnds*KDIM0, KDIM1);
       for (Long i = 0; i < Nnds; i++) {
-        const Real r[2] = {-Xs_[i][0], -Xs_[i][1]};
+        using VecType = Vec<Real,1>; // TODO: vectorize
+        const VecType r[2] = {-Xs_[i][0], -Xs_[i][1]};
         const Real dx[2] = {dXs_[i][0], dXs_[i][1]};
         const Real da = sqrt<Real>(dx[0]*dx[0] + dx[1]*dx[1]);
         const Real da_inv = 1/da;
-        const Real n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
+        const VecType n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
 
-        Real M_[KDIM0][KDIM1];
-        KerFn::template uKerMatrix<digits,Real>(M_, r, n, nullptr);
+        VecType M_[KDIM0][KDIM1];
+        KerFn::template uKerMatrix<digits>(M_, r, n, nullptr);
         for (Long k0 = 0; k0 < KDIM0; k0++) {
           for (Long k1 = 0; k1 < KDIM1; k1++) {
-            MM(i*KDIM0+k0, k1) = M_[k0][k1] * da * wts[i] * KerFn::template uKerScaleFactor<Real>();
+            MM(i*KDIM0+k0, k1) = M_[k0][k1][0] * da * wts[i] * KerFn::template uKerScaleFactor<Real>();
           }
         }
       }
@@ -466,7 +607,7 @@ namespace sctl {
       Matrix<Real>::GEMM(M_, Minterp, Matrix<Real>(Nnds, KDIM0*KDIM1, MM.begin(), false));
     }
 
-    template <class KerFn, class Mat, class CoordVec> static void PanelKernelMatAdap(Mat& M, const CoordVec& Xs, const Real tol) { // assume Xt = 0
+    template <class KerFn, Integer digits, class Mat, class CoordVec> static void PanelKernelMatAdap(Mat& M, const CoordVec& Xs, const Real tol) { // assume Xt = 0
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
@@ -495,9 +636,9 @@ namespace sctl {
         }
         min_dist = sqrt<Real>(min_dist2);
       }
-      if (min_dist == 0) return PanelKernelMatSing<KerFn>(M, Xs, min_idx, tol);
+      if (min_dist == 0) return PanelKernelMatSing<KerFn,digits>(M, Xs, min_idx, tol);
 
-      PanelKernelMat<KerFn>(M, Xs);
+      PanelKernelMat<KerFn,digits>(M, Xs);
       if (tol <= 0) return;
 
       CoordVec Xs1, Xs2;
@@ -510,8 +651,8 @@ namespace sctl {
       Mat MM;
       { // Set MM
         Mat Mchild1, Mchild2;
-        PanelKernelMat<KerFn>(Mchild1, Xs1);
-        PanelKernelMat<KerFn>(Mchild2, Xs2);
+        PanelKernelMat<KerFn,digits>(Mchild1, Xs1);
+        PanelKernelMat<KerFn,digits>(Mchild2, Xs2);
         const Matrix<Real> Mchild1_(Order, KDIM0*KDIM1, Mchild1.begin(), false);
         const Matrix<Real> Mchild2_(Order, KDIM0*KDIM1, Mchild2.begin(), false);
         Matrix<Real> MM_(Order, KDIM0*KDIM1, MM.begin(), false);
@@ -573,8 +714,8 @@ namespace sctl {
         }
       } else {
         Mat M1, M2;
-        PanelKernelMatAdap<KerFn>(M1, Xs1, tol);
-        PanelKernelMatAdap<KerFn>(M2, Xs2, tol);
+        PanelKernelMatAdap<KerFn,digits>(M1, Xs1, tol);
+        PanelKernelMatAdap<KerFn,digits>(M2, Xs2, tol);
         const Matrix<Real> M1_(Order, KDIM0*KDIM1, M1.begin(), false);
         const Matrix<Real> M2_(Order, KDIM0*KDIM1, M2.begin(), false);
         Matrix<Real> M_(Order, KDIM0*KDIM1, M.begin(), false);
@@ -585,8 +726,6 @@ namespace sctl {
     Long Npanel;
     Vector<Real> X_, dX_, Normal_; // Npanel * Order * COORD_DIM
     Vector<Real> SurfWts_; // Npanel * Order
-
-    friend Derived;
   };
 
 }
