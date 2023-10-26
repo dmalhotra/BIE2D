@@ -11,127 +11,103 @@ namespace sctl {
 
     const Long Ndisc = Xc.Dim() / COORD_DIM;
     theta_break.ReInit(Ndisc);
-    { // Set theta_break_flat, theta_break
-      Long total_panel_count = 0;
-      theta_break_flat.ReInit(total_panel_count);
-      Long offset = 0;
-      for (Long i = 0; i < Ndisc; i++) {
-        Long disc_i_panel_count = 0;
-        theta_break[i].ReInit(disc_i_panel_count, theta_break_flat.begin() + offset, false);
-        offset += disc_i_panel_count;
-      }
+
+    const Real pi = const_pi<Real>();
+    Real fac = 1;
+    Real close_threshold = 0.5;
+    Real dan = 2*asin(1/(2+close_threshold));
+    Real dhairya = acos(0.5+close_threshold/4);
+    Real close_angle = fac * std::min(dan, dhairya);
+    Real c = 0.5*close_angle;
+
+    Vector<Vector<Real>> breaks(Ndisc);
+    Vector<Vector<Long>> ireverse(Ndisc);
+    Vector<Long> iforward;
+    Long Npanel = 0;
+
+    // Adaptively construct panel breakpoints on each disc
+    // TODO: This is currently O(Ndisc^2), but should be O(Ndisc) with a kd-tree
+    for (Long j = 0; j < Ndisc; j++)
+    {
+        for (Long k = j+1; k < Ndisc; k++)
+        {
+            Real dx = Xc[2*j]   - Xc[2*k];
+            Real dy = Xc[2*j+1] - Xc[2*k+1];
+            Real dist = sqrt(dx*dx + dy*dy) - 2*R;
+            if ( dist < close_threshold*R )
+            {
+                Real theta_j = fmod(atan2(dy,dx)+pi, 2*pi);
+                Real theta_k = fmod(theta_j+pi, 2*pi);
+
+                // Add the endpoints of the near-region to the list of panel
+                // breakpoints for each disc
+                Long start_idx_j = theta_break[j].Dim();
+                Long start_idx_k = theta_break[k].Dim();
+                theta_break[j].PushBack(theta_j-c);
+                theta_break[j].PushBack(theta_j+c);
+                theta_break[k].PushBack(theta_k-c);
+                theta_break[k].PushBack(theta_k+c);
+
+                // Refine the near-region until the panel size is less than
+                // the square root of the distance between the discs
+                Long nlevels = (Long)ceil(log2(close_angle/sqrt(dist)));
+                if (nlevels > 0)
+                {
+                    theta_break[j].PushBack(theta_j);
+                    theta_break[k].PushBack(theta_k);
+                }
+                Real cl = c;
+                for (Long l = 1; l < nlevels; l++)
+                {
+                    cl = 0.5*cl;
+                    theta_break[j].PushBack(theta_j-cl);
+                    theta_break[j].PushBack(theta_j+cl);
+                    theta_break[k].PushBack(theta_k-cl);
+                    theta_break[k].PushBack(theta_k+cl);
+                }
+
+                NearData neardata;
+                neardata.disc_idx0 = j;
+                neardata.disc_idx1 = k;
+                neardata.panel_idx_range0[0] = start_idx_j;
+                neardata.panel_idx_range0[1] = theta_break[j].Dim()-1;
+                neardata.panel_idx_range1[0] = start_idx_k;
+                neardata.panel_idx_range1[1] = theta_break[k].Dim()-1;
+                near_lst.PushBack(neardata);
+            }
+        }
+
+        // Create index vector that puts the breaks in sorted order
+        iforward.ReInit(theta_break[j].Dim());
+        for (Long i = 0; i < iforward.Dim(); i++) {
+          iforward[i] = i;
+        }
+        std::sort(iforward.begin(), iforward.end(), [&](Long ki, Long kj) {
+          return theta_break[j][ki] < theta_break[j][kj];
+        });
+
+        // Create index vector that reverses the mapping
+        ireverse[j].ReInit(theta_break[j].Dim());
+        for (Long i = 0; i < theta_break[j].Dim(); i++) {
+          ireverse[j][iforward[i]] = i;
+        }
+
+        // Do the actual sorting
+        std::sort(theta_break[j].begin(), theta_break[j].end());
+
+        // Add this disc's panels to the total number of panels
+        Npanel += theta_break[j].Dim();
     }
 
-    if (1) { // init 2-disc case for testing
-      if (R <= 0) R = 0.75;
-      if (Xc.Dim() != 2*COORD_DIM) {
-        Xc.ReInit(0);
-        Xc.PushBack(-0.8); Xc.PushBack(0);
-        Xc.PushBack( 0.8); Xc.PushBack(0);
-      }
-
-      theta_break_flat.ReInit(0);
-      theta_break_flat.PushBack(-0.1/1);
-      theta_break_flat.PushBack(-0.1/2);
-      if (adap) {
-        theta_break_flat.PushBack(-0.1/4);
-        theta_break_flat.PushBack(-0.1/8);
-        theta_break_flat.PushBack(-0.1/16);
-        theta_break_flat.PushBack(-0.1/32);
-        theta_break_flat.PushBack(-0.1/64);
-        theta_break_flat.PushBack(-0.1/128);
-        theta_break_flat.PushBack(-0.1/256);
-        theta_break_flat.PushBack(-0.1/512);
-        theta_break_flat.PushBack(-0.1/1024);
-        theta_break_flat.PushBack(-0.1/2048);
-        theta_break_flat.PushBack(-0.1/4096);
-      }
-      theta_break_flat.PushBack(0);
-      if (adap) {
-        theta_break_flat.PushBack( 0.1/4096);
-        theta_break_flat.PushBack( 0.1/2048);
-        theta_break_flat.PushBack( 0.1/1024);
-        theta_break_flat.PushBack( 0.1/512);
-        theta_break_flat.PushBack( 0.1/256);
-        theta_break_flat.PushBack( 0.1/128);
-        theta_break_flat.PushBack( 0.1/64);
-        theta_break_flat.PushBack( 0.1/32);
-        theta_break_flat.PushBack( 0.1/16);
-        theta_break_flat.PushBack( 0.1/8);
-        theta_break_flat.PushBack( 0.1/4);
-      }
-      theta_break_flat.PushBack( 0.1/2);
-      theta_break_flat.PushBack( 0.1/1);
-      theta_break_flat.PushBack( 0.2);
-      theta_break_flat.PushBack( 0.3);
-      theta_break_flat.PushBack( 0.4);
-      theta_break_flat.PushBack( 0.5);
-      theta_break_flat.PushBack( 0.6);
-      theta_break_flat.PushBack( 0.7);
-      theta_break_flat.PushBack( 0.8);
-
-      theta_break_flat.PushBack( 0.0);
-      theta_break_flat.PushBack( 0.1);
-      theta_break_flat.PushBack( 0.2);
-      theta_break_flat.PushBack( 0.3);
-      theta_break_flat.PushBack( 0.5 - 0.1/1);
-      theta_break_flat.PushBack( 0.5 - 0.1/2);
-      if (adap) {
-        theta_break_flat.PushBack( 0.5 - 0.1/4);
-        theta_break_flat.PushBack( 0.5 - 0.1/8);
-        theta_break_flat.PushBack( 0.5 - 0.1/16);
-        theta_break_flat.PushBack( 0.5 - 0.1/32);
-        theta_break_flat.PushBack( 0.5 - 0.1/64);
-        theta_break_flat.PushBack( 0.5 - 0.1/128);
-        theta_break_flat.PushBack( 0.5 - 0.1/256);
-        theta_break_flat.PushBack( 0.5 - 0.1/512);
-        theta_break_flat.PushBack( 0.5 - 0.1/1024);
-        theta_break_flat.PushBack( 0.5 - 0.1/2048);
-        theta_break_flat.PushBack( 0.5 - 0.1/4096);
-      }
-      theta_break_flat.PushBack( 0.5);
-      if (adap) {
-        theta_break_flat.PushBack( 0.5 + 0.1/4096);
-        theta_break_flat.PushBack( 0.5 + 0.1/2048);
-        theta_break_flat.PushBack( 0.5 + 0.1/1024);
-        theta_break_flat.PushBack( 0.5 + 0.1/512);
-        theta_break_flat.PushBack( 0.5 + 0.1/256);
-        theta_break_flat.PushBack( 0.5 + 0.1/128);
-        theta_break_flat.PushBack( 0.5 + 0.1/64);
-        theta_break_flat.PushBack( 0.5 + 0.1/32);
-        theta_break_flat.PushBack( 0.5 + 0.1/16);
-        theta_break_flat.PushBack( 0.5 + 0.1/8);
-        theta_break_flat.PushBack( 0.5 + 0.1/4);
-      }
-      theta_break_flat.PushBack( 0.5 + 0.1/2);
-      theta_break_flat.PushBack( 0.5 + 0.1/1);
-      theta_break_flat.PushBack( 0.7);
-      theta_break_flat.PushBack( 0.8);
-      theta_break_flat.PushBack( 0.9);
-      theta_break_flat *= 2*const_pi<Real>();
-
-      const Long Ndisc = Xc.Dim() / COORD_DIM;
-      theta_break.ReInit(Ndisc);
-      Long offset = 0;
-      for (Long i = 0; i < Ndisc; i++) {
-        Long disc_i_panel_count = (adap ? 34 : 12);
-        theta_break[i].ReInit(disc_i_panel_count, theta_break_flat.begin() + offset, false);
-        offset += disc_i_panel_count;
-      }
-
-      near_lst.ReInit(1);
-      near_lst[0].disc_idx0 = 0;
-      near_lst[0].disc_idx1 = 1;
-      near_lst[0].panel_idx_range0[0] = 0;
-      near_lst[0].panel_idx_range0[1] = 0 + (adap ? 26 : 4);
-      near_lst[0].panel_idx_range1[0] = 4;
-      near_lst[0].panel_idx_range1[1] = 4 + (adap ? 26 : 4);
+    // Update the near interaction list with the sorted indices
+    for (auto& neardata : near_lst) {
+      neardata.panel_idx_range0[0] = ireverse[neardata.disc_idx0][neardata.panel_idx_range0[0]] * Order;
+      neardata.panel_idx_range0[1] = ireverse[neardata.disc_idx0][neardata.panel_idx_range0[1]] * Order;
+      neardata.panel_idx_range1[0] = ireverse[neardata.disc_idx1][neardata.panel_idx_range1[0]] * Order;
+      neardata.panel_idx_range1[1] = ireverse[neardata.disc_idx1][neardata.panel_idx_range1[1]] * Order;
     }
 
     { // Init PanelLst, panel_cnt, panel_dsp
-      const Long Ndisc = Xc.Dim() / COORD_DIM;
-      const Long Npanel = theta_break_flat.Dim();
-
       Long offset = 0;
       panel_cnt.ReInit(Ndisc);
       panel_dsp.ReInit(Ndisc);
