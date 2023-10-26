@@ -1,11 +1,14 @@
-#ifndef BIE2D_DISC_COMP_HPP
-#define BIE2D_DISC_COMP_HPP
+#ifndef BIE2D_DISC_PANEL_LST_HPP
+#define BIE2D_DISC_PANEL_LST_HPP
 
 #include <sctl.hpp>
 #include <bie2d/panel-lst.hpp>
 
 namespace sctl {
 
+  /**
+   * Derived class of PanelLst, for panelization of discs.
+   */
   template <class Real, Integer Order = 16> class DiscPanelLst : public PanelLst<Real,Order> {
     using PanelLstType = PanelLst<Real,Order>;
     static constexpr Integer COORD_DIM = PanelLstType::CoordDim();
@@ -14,8 +17,8 @@ namespace sctl {
 
     struct NearData {
       Long disc_idx0, disc_idx1;
-      StaticArray<Long,COORD_DIM> panel_idx_range0;
-      StaticArray<Long,COORD_DIM> panel_idx_range1;
+      StaticArray<Long,2> panel_idx_range0; // element range on disc0
+      StaticArray<Long,2> panel_idx_range1; // element range on disc1
     };
 
     /**
@@ -26,6 +29,8 @@ namespace sctl {
     virtual ~DiscPanelLst() {}
 
     /**
+     * Initialize.
+     *
      * @param[in] Xc coordinates of the center of each disc (length = Ndisc * COORD_DIM)
      *
      * @param[in] R radius of the discs.
@@ -54,10 +59,12 @@ namespace sctl {
       }
 
       if (1) { // init 2-disc case for testing
-        R = 0.75;
-        Xc.ReInit(0);
-        Xc.PushBack(-0.8); Xc.PushBack(0);
-        Xc.PushBack( 0.8); Xc.PushBack(0);
+        if (R <= 0) R = 0.75;
+        if (Xc.Dim() != 2*COORD_DIM) {
+          Xc.ReInit(0);
+          Xc.PushBack(-0.8); Xc.PushBack(0);
+          Xc.PushBack( 0.8); Xc.PushBack(0);
+        }
 
         theta_break_flat.ReInit(0);
         theta_break_flat.PushBack(-0.1/1);
@@ -68,9 +75,21 @@ namespace sctl {
           theta_break_flat.PushBack(-0.1/16);
           theta_break_flat.PushBack(-0.1/32);
           theta_break_flat.PushBack(-0.1/64);
+          theta_break_flat.PushBack(-0.1/128);
+          theta_break_flat.PushBack(-0.1/256);
+          theta_break_flat.PushBack(-0.1/512);
+          theta_break_flat.PushBack(-0.1/1024);
+          theta_break_flat.PushBack(-0.1/2048);
+          theta_break_flat.PushBack(-0.1/4096);
         }
         theta_break_flat.PushBack(0);
         if (adap) {
+          theta_break_flat.PushBack( 0.1/4096);
+          theta_break_flat.PushBack( 0.1/2048);
+          theta_break_flat.PushBack( 0.1/1024);
+          theta_break_flat.PushBack( 0.1/512);
+          theta_break_flat.PushBack( 0.1/256);
+          theta_break_flat.PushBack( 0.1/128);
           theta_break_flat.PushBack( 0.1/64);
           theta_break_flat.PushBack( 0.1/32);
           theta_break_flat.PushBack( 0.1/16);
@@ -99,9 +118,21 @@ namespace sctl {
           theta_break_flat.PushBack( 0.5 - 0.1/16);
           theta_break_flat.PushBack( 0.5 - 0.1/32);
           theta_break_flat.PushBack( 0.5 - 0.1/64);
+          theta_break_flat.PushBack( 0.5 - 0.1/128);
+          theta_break_flat.PushBack( 0.5 - 0.1/256);
+          theta_break_flat.PushBack( 0.5 - 0.1/512);
+          theta_break_flat.PushBack( 0.5 - 0.1/1024);
+          theta_break_flat.PushBack( 0.5 - 0.1/2048);
+          theta_break_flat.PushBack( 0.5 - 0.1/4096);
         }
         theta_break_flat.PushBack( 0.5);
         if (adap) {
+          theta_break_flat.PushBack( 0.5 + 0.1/4096);
+          theta_break_flat.PushBack( 0.5 + 0.1/2048);
+          theta_break_flat.PushBack( 0.5 + 0.1/1024);
+          theta_break_flat.PushBack( 0.5 + 0.1/512);
+          theta_break_flat.PushBack( 0.5 + 0.1/256);
+          theta_break_flat.PushBack( 0.5 + 0.1/128);
           theta_break_flat.PushBack( 0.5 + 0.1/64);
           theta_break_flat.PushBack( 0.5 + 0.1/32);
           theta_break_flat.PushBack( 0.5 + 0.1/16);
@@ -119,7 +150,7 @@ namespace sctl {
         theta_break.ReInit(Ndisc);
         Long offset = 0;
         for (Long i = 0; i < Ndisc; i++) {
-          Long disc_i_panel_count = (adap ? 22 : 12);
+          Long disc_i_panel_count = (adap ? 34 : 12);
           theta_break[i].ReInit(disc_i_panel_count, theta_break_flat.begin() + offset, false);
           offset += disc_i_panel_count;
         }
@@ -128,9 +159,9 @@ namespace sctl {
         near_lst[0].disc_idx0 = 0;
         near_lst[0].disc_idx1 = 1;
         near_lst[0].panel_idx_range0[0] = 0;
-        near_lst[0].panel_idx_range0[1] = 0 + (adap ? 14 : 4);
-        near_lst[0].panel_idx_range0[0] = 4;
-        near_lst[0].panel_idx_range0[1] = 4 + (adap ? 14 : 4);
+        near_lst[0].panel_idx_range0[1] = 0 + (adap ? 26 : 4);
+        near_lst[0].panel_idx_range1[0] = 4;
+        near_lst[0].panel_idx_range1[1] = 4 + (adap ? 26 : 4);
       }
 
       { // Init PanelLst, panel_cnt, panel_dsp
@@ -176,18 +207,38 @@ namespace sctl {
       }
     }
 
+    /**
+     * Return the number of discs.
+     */
     Long DiscCount() const {
       return Xc.Dim() / COORD_DIM;
     }
 
+    /**
+     * Return the radius of the discs.
+     */
     Real DiscRadius() const {
       return R;
     }
 
+    /**
+     * Get the coordinates of the center of a disc.
+     *
+     * @param[in] disc_idx index of the disc (0 <= disc_idx < DiscCount()).
+     */
     std::tuple<Real,Real> DiscCoord(const Long disc_idx) const {
       return {Xc[disc_idx*COORD_DIM+0], Xc[disc_idx*COORD_DIM+1]};
     }
 
+    /**
+     * Get the surface discretization nodes.
+     *
+     * @param[in] disc_idx index of the disc (0 <= disc_idx < DiscCount()), or
+     * if disc_idx=-1 then return the discretization nodes for all discs.
+     *
+     * @return const reference of the vector containing the surface
+     * discretization nodes in AoS order (i.e. {x1,y1,x2,y2,...,xn,yn}).
+     */
     const Vector<Real>& SurfCoord(const Long disc_idx) const {
       SCTL_ASSERT(disc_idx < X.Dim());
       return (disc_idx < 0 ? PanelLstType::SurfCoord() : X[disc_idx]);
@@ -205,12 +256,21 @@ namespace sctl {
       return (disc_idx < 0 ? theta_break_flat : theta_break[disc_idx]);
     }
 
-    const Vector<NearData>& GetNearLst() const {
+    /**
+     * @return const reference of a vector of NearData, containing the
+     * near-interaction data.
+     */
+    const Vector<NearData>& GetNearList() const {
       return near_lst;
     }
 
-    Long GetPanelIdx(const Long disc_idx, const Long disc_panel_idx) {
-      return panel_dsp[disc_idx] + disc_panel_idx;
+    /**
+     * Returns the index of the first panel of a disc in the global panel list.
+     *
+     * @param[in] disc_idx index of the disc (0 <= disc_idx < DiscCount()).
+     */
+    Long PanelIdxOffset(const Long disc_idx) const {
+      return panel_dsp[disc_idx];
     }
 
     private:
@@ -225,102 +285,6 @@ namespace sctl {
 
     Vector<NearData> near_lst;
   };
-
-  //template <class Real, class Kernel> class DiscBIOp {
-  //  static constexpr Integer COORD_DIM = Kernel.CoordDim();
-  //  static constexpr Integer KDIM0 = Kernel.SrcDim();
-  //  static constexpr Integer KDIM1 = Kernel.TrgDim();
-
-  //  public:
-
-  //  BoundaryIntegral(const Comm comm_) : comm(comm_) {}
-
-  //  template <class PanelLstType> void Setup(const PanelLstType& panel_lst, const Vector<Real>& Xt = Vector<Real>()) {
-  //    X = panel_lst.SurfCoord();
-  //    Xn = panel_lst.SurfNormal();
-  //    wts = panel_lst.SurfWts();
-  //    Y = (Xt.Dim() ? Xt : X);
-  //  }
-
-  //  void EvaluatePotential(Vector<Real>& U, const Vector<Real>& F) const {
-  //    const Long Nt = Y.Dim() / COORD_DIM;
-  //    if (U.Dim() !=)
-  //  }
-
-  //  private:
-
-  //  Comm comm;
-  //  Vector<Real> X, Xn, wts; // src
-  //  Vector<Real> Y; // trg
-  //};
-
-
-  template <class Real, Integer Order, class Derived> class ICIP {
-    static constexpr Integer COORD_DIM = 2;
-
-    public:
-
-    ICIP(const Comm& comm_ = Comm::Self()) : comm(comm_) {}
-
-    void Setup(const Vector<Real>& Xc, const Real R, bool icip = true) {
-      disc_panels.Init(Xc, R, !icip);
-    }
-
-    private:
-
-    virtual void BuildPrecomp() = 0;
-
-    Comm comm;
-    DiscPanelLst<Real,Order> disc_panels;
-  };
-
-  /**
-   * Solve the Stokes mobility boundary integral equation.
-   */
-  template <class Real, Integer Order = 16> class DiscMobility : public ICIP<Real,Order,DiscMobility<Real,Order>> {
-    using ICIPType = ICIP<Real,Order,DiscMobility<Real,Order>>;
-    static constexpr Integer COORD_DIM = ICIPType::COORD_DIM;
-
-    public:
-
-    DiscMobility(const Comm& comm = Comm::Self());
-
-    void Setup(const Vector<Real>& Xc, const Real R, bool icip = true) {
-      ICIPType::Setup(Xc, R, icip);
-    }
-
-    /**
-     * @param[out] V velocity and angular velocity of each disc (length= = Nx3).
-     *
-     * @param[in] F force and torque on each disc (length = Nx3).
-     *
-     * @param[in] Vs slip velocity (length = Nnodes * COORD_DIM or zero slip if empty)
-     */
-    void SolveMobility(Vector<Real> V, const Vector<Real> F, const Vector<Real> Vs = Vector<Real>());
-
-    private:
-
-    virtual void BuildPrecomp(const Real R, const Long InterpOrder, const Real d_min, const Real d_max) {
-      Vector<Real> Xc(2*COORD_DIM);
-      Xc = 0;
-
-      const auto& leg_nds = LegQuadRule<Real>::ComputeNds(InterpOrder);
-      for (Long i = 0; i < InterpOrder; i++) { // loop over interpolation nodes
-        const Real x = R + R/2 * d_min * exp(log(d_max/d_min) * leg_nds[i]);
-        Xc[0*COORD_DIM+0] =-x;
-        Xc[1*COORD_DIM+0] = x;
-        DiscPanelLst<Real> panels_fine, panels_coarse;
-        panels_coarse.Init(Xc, R, false, d_max);
-        panels_fine.Init(Xc, R, true, d_max);
-
-      }
-    }
-
-    Comm comm;
-    //BoundaryIntegral<Real,>
-    //NearCorrection<Real> near_correction; // stores the near quadrature corrections and the compressed near interactions
-  };
-
 
 }
 

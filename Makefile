@@ -1,7 +1,6 @@
 SCTL_INCLUDE_DIR = SCTL/include
 
-#CXX=c++ # requires g++-8 or newer / icpc (with gcc compatibility 7.5 or newer) / clang++ with llvm-10 or newer
-CXX=mpicxx -DSCTL_HAVE_MPI
+CXX=c++ # requires g++-8 or newer / icpc (with gcc compatibility 7.5 or newer) / clang++ with llvm-10 or newer
 #CXX=/mnt/sw/nix/store/jrw0k2lr4i16pn5ja1rp34wzazdq7ivw-intel-oneapi-compilers-2023.0.0/compiler/2023.0.0/linux/bin/icpx
 CXXFLAGS = -std=c++11 -fopenmp -Wall -Wfloat-conversion # need C++11 and OpenMP
 
@@ -55,8 +54,7 @@ OBJDIR = ./obj
 INCDIR = ./include
 
 TARGET_BIN = \
-       $(BINDIR)/dbl-test \
-       $(BINDIR)/bie-solve
+       $(BINDIR)/stokes-mobility
 
 all : $(TARGET_BIN)
 

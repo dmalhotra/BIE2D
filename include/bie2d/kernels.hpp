@@ -82,9 +82,10 @@ namespace sctl {
       return 1 / (4 * const_pi<Real>());
     }
     template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
+      using ScalarType = typename VecType::ScalarType;
       const VecType r2 = r[0]*r[0]+r[1]*r[1];
       const VecType r2inv = approx_inv<digits>(r2);
-      const VecType log_rinv = approx_log<digits>(r2) * (-0.5);
+      const VecType log_rinv = approx_log<digits>(r2) * ((ScalarType)-0.5);
       u[0][0] = log_rinv + r[0]*r[0]*r2inv;
       u[0][1] =            r[0]*r[1]*r2inv;
       u[1][0] =            r[1]*r[0]*r2inv;
