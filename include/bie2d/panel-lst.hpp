@@ -99,7 +99,7 @@ namespace sctl {
       }
     }
 
-    template <class KerFn, Integer digits = 10> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol, const Long panel_start = 0, const Long panel_end = -1) const {
+    template <class KerFn, Integer digits> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol, const Long panel_start = 0, const Long panel_end = -1) const {
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
@@ -135,13 +135,6 @@ namespace sctl {
         }
       }
     }
-
-
-
-
-
-
-
 
 
     /**
@@ -269,9 +262,36 @@ namespace sctl {
       SCTL_ASSERT(!trg_dot_prod);
 
       if (M_lst.Dim() != Npanel) M_lst.ReInit(Npanel);
-      for (Long i = 0; i < Npanel; i++) {
-        const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
-        panel_lst.template LayerPotentialMatrix<Kernel>(M_lst[i], Xt, tol, i, i+1);
+      if (tol > 1e-3) {
+        for (Long i = 0; i < Npanel; i++) {
+          const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+          panel_lst.template LayerPotentialMatrix<Kernel,3>(M_lst[i], Xt, tol, i, i+1);
+        }
+      } else if (tol > 1e-6) {
+        for (Long i = 0; i < Npanel; i++) {
+          const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+          panel_lst.template LayerPotentialMatrix<Kernel,6>(M_lst[i], Xt, tol, i, i+1);
+        }
+      } else if (tol > 1e-9) {
+        for (Long i = 0; i < Npanel; i++) {
+          const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+          panel_lst.template LayerPotentialMatrix<Kernel,9>(M_lst[i], Xt, tol, i, i+1);
+        }
+      } else if (tol > 1e-12) {
+        for (Long i = 0; i < Npanel; i++) {
+          const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+          panel_lst.template LayerPotentialMatrix<Kernel,12>(M_lst[i], Xt, tol, i, i+1);
+        }
+      } else if (tol > 1e-15) {
+        for (Long i = 0; i < Npanel; i++) {
+          const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+          panel_lst.template LayerPotentialMatrix<Kernel,15>(M_lst[i], Xt, tol, i, i+1);
+        }
+      } else {
+        for (Long i = 0; i < Npanel; i++) {
+          const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
+          panel_lst.template LayerPotentialMatrix<Kernel,-1>(M_lst[i], Xt, tol, i, i+1);
+        }
       }
     }
 
@@ -296,7 +316,12 @@ namespace sctl {
      */
     template <class Kernel> static void NearInterac(Matrix<Real>& M, const Vector<Real>& Xt, const Vector<Real>& normal_trg, const Kernel& ker, Real tol, const Long elem_idx, const ElementListBase<Real>* self) {
       const auto& panel_lst = *dynamic_cast<const PanelLst*>(self);
-      panel_lst.template LayerPotentialMatrix<Kernel>(M, Xt, tol, elem_idx, elem_idx+1);
+      if      (tol > 1e-03) panel_lst.template LayerPotentialMatrix<Kernel, 3>(M, Xt, tol, elem_idx, elem_idx+1);
+      else if (tol > 1e-06) panel_lst.template LayerPotentialMatrix<Kernel, 6>(M, Xt, tol, elem_idx, elem_idx+1);
+      else if (tol > 1e-09) panel_lst.template LayerPotentialMatrix<Kernel, 9>(M, Xt, tol, elem_idx, elem_idx+1);
+      else if (tol > 1e-12) panel_lst.template LayerPotentialMatrix<Kernel,12>(M, Xt, tol, elem_idx, elem_idx+1);
+      else if (tol > 1e-15) panel_lst.template LayerPotentialMatrix<Kernel,15>(M, Xt, tol, elem_idx, elem_idx+1);
+      else                  panel_lst.template LayerPotentialMatrix<Kernel,-1>(M, Xt, tol, elem_idx, elem_idx+1);
     }
 
     private:

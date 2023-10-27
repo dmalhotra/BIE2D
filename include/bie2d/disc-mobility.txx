@@ -4,15 +4,36 @@ namespace sctl {
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
+    RigidVelocityBasis(V0, this->disc_panels);
     StokesSL_BIOp.AddElemList(this->disc_panels);
     StokesDL_BIOp.AddElemList(this->disc_panels);
-    RigidVelocityBasis(V0, this->disc_panels);
+    StokesSL_BIOp.SetAccuracy(tol);
+    StokesDL_BIOp.SetAccuracy(tol);
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real> F, const Vector<Real> Vs, const Long gmres_max_iter) {
     const Long Ndisc = this->disc_panels.DiscCount();
     const Long N = this->disc_panels.Size() * Order * COORD_DIM;
     const Real R = this->disc_panels.DiscRadius();
+
+    if (0) { // print operator matrix
+      Matrix<Real> M(N, N); M.SetZero();
+      for (Long i = 0; i < N; i++) {
+        Vector<Real> U(N, M[i], false);
+        Vector<Real> sigma(N); sigma.SetZero();
+        sigma[i] = 1;
+        this->ApplyBIOp(&U, sigma);
+      }
+      std::cout<<"B=[\n";
+      std::cout<<std::setprecision(16);
+      for (Long i = 0; i < M.Dim(0); i++) {
+        for (Long j = 0; j < M.Dim(1); j++) {
+          std::cout<<M[i][j]<<' ';
+        }
+        std::cout<<'\n';
+      }
+      std::cout<<"];\n";
+    }
 
     Vector<Real> nu; // boundary force
     { // Set nu

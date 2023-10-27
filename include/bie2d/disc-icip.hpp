@@ -121,6 +121,9 @@ namespace sctl {
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
   };
 
+  template <class Real, Integer Order> constexpr Real ICIP<Real,Order>::d_max;
+  template <class Real, Integer Order> constexpr Real ICIP<Real,Order>::d_min;
+
 }
 
 #include <bie2d/disc-icip.txx>
