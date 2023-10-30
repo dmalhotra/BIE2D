@@ -76,9 +76,9 @@ namespace sctl {
                 neardata.disc_idx0 = j;
                 neardata.disc_idx1 = k;
                 neardata.panel_idx_range0[0] = start_idx_j;
-                neardata.panel_idx_range0[1] = theta_break[j].Dim()-1;
+                neardata.panel_idx_range0[1] = start_idx_j+1; // the next breakpoint after start_idx is the near-region's end
                 neardata.panel_idx_range1[0] = start_idx_k;
-                neardata.panel_idx_range1[1] = theta_break[k].Dim()-1;
+                neardata.panel_idx_range1[1] = start_idx_k+1;
                 near_lst.PushBack(neardata);
             }
         }
@@ -128,10 +128,10 @@ namespace sctl {
 
     // Update the near interaction list with the sorted indices
     for (auto& neardata : near_lst) {
-      neardata.panel_idx_range0[0] = ireverse[neardata.disc_idx0][neardata.panel_idx_range0[0]] * Order;
-      neardata.panel_idx_range0[1] = ireverse[neardata.disc_idx0][neardata.panel_idx_range0[1]] * Order;
-      neardata.panel_idx_range1[0] = ireverse[neardata.disc_idx1][neardata.panel_idx_range1[0]] * Order;
-      neardata.panel_idx_range1[1] = ireverse[neardata.disc_idx1][neardata.panel_idx_range1[1]] * Order;
+      neardata.panel_idx_range0[0] = ireverse[neardata.disc_idx0][neardata.panel_idx_range0[0]];
+      neardata.panel_idx_range0[1] = ireverse[neardata.disc_idx0][neardata.panel_idx_range0[1]];
+      neardata.panel_idx_range1[0] = ireverse[neardata.disc_idx1][neardata.panel_idx_range1[0]];
+      neardata.panel_idx_range1[1] = ireverse[neardata.disc_idx1][neardata.panel_idx_range1[1]];
     }
 
     { // Init PanelLst, panel_cnt, panel_dsp

@@ -2,7 +2,7 @@
 using namespace sctl;
 
 constexpr Integer ElemOrder = 16;
-using RefReal = long double;
+using RefReal = long double; // reference solution precision
 using Real = double;
 
 const char data_path[]="data2/";
@@ -14,7 +14,7 @@ template <Integer ElemOrder, class Real> Vector<Real> DiscMobilitySolve(const Ve
 
   Vector<Real> V;
   disc_mobility.Init(X, R, tol, icip_type);
-  disc_mobility.Solve(V, F, Vector<Real>(), 300);
+  disc_mobility.Solve(V, F, Vector<Real>(), 2000);
   return V;
 }
 
@@ -27,9 +27,11 @@ int main() {
 
   Vector<Real> X(Ndisc*COORD_DIM), F(Ndisc*3);
   { // Set F, X
+    const Real eps = 1e-5;
+
     X = 0;
-    X[0] = -0.7501; X[1] = 0.0;
-    X[2] =  0.7501; X[3] = 0.0;
+    X[0] = -(R+eps/2)*sqrt<Real>(0.5); X[1] = -(R+eps/2)*sqrt<Real>(0.5);
+    X[2] =  (R+eps/2)*sqrt<Real>(0.5); X[3] =  (R+eps/2)*sqrt<Real>(0.5);
     //X[4] =  0.0; X[5] =-0.5;
 
     F = 0;
@@ -51,18 +53,15 @@ int main() {
 
   //for (Long i = 0; i < 1000; i++) {
     const auto V0 = quad2real(DiscMobilitySolve<ElemOrder+8,RefReal>(real2quad(F), real2quad(X), R, ICIPType::Adaptive, tol*1e-3));
-    const auto V1 = quad2real(DiscMobilitySolve<ElemOrder,RefReal>(real2quad(F), real2quad(X), R, ICIPType::Adaptive, tol*1e-3));
-    const auto V2 = DiscMobilitySolve<ElemOrder>(F, X, R, ICIPType::Adaptive, tol);
-    const auto V3 = DiscMobilitySolve<ElemOrder>(F, X, R, ICIPType::Compress, tol);
-    const auto V4 = DiscMobilitySolve<ElemOrder>(F, X, R, ICIPType::Precond , tol);
+    const auto V1 = DiscMobilitySolve<ElemOrder>(F, X, R, ICIPType::Adaptive, tol);
+    const auto V2 = DiscMobilitySolve<ElemOrder>(F, X, R, ICIPType::Compress, tol);
+    const auto V3 = DiscMobilitySolve<ElemOrder>(F, X, R, ICIPType::Precond , tol);
 
-    Real err_disc = 0, err_adap = 0, err_comp = 0, err_prec = 0, max_val = 0;
+    Real err_adap = 0, err_comp = 0, err_prec = 0, max_val = 0;
     for (const auto x : V0) max_val = std::max<Real>(max_val, fabs(x));
-    for (const auto x : V0-V1) err_disc = std::max<Real>(err_disc, fabs(x));
-    for (const auto x : V0-V2) err_adap = std::max<Real>(err_adap, fabs(x));
-    for (const auto x : V0-V3) err_comp = std::max<Real>(err_comp, fabs(x));
-    for (const auto x : V0-V4) err_prec = std::max<Real>(err_prec, fabs(x));
-    std::cout<<"Error (discreti) = "<<err_disc/max_val<<'\n';
+    for (const auto x : V0-V1) err_adap = std::max<Real>(err_adap, fabs(x));
+    for (const auto x : V0-V2) err_comp = std::max<Real>(err_comp, fabs(x));
+    for (const auto x : V0-V3) err_prec = std::max<Real>(err_prec, fabs(x));
     std::cout<<"Error (adaptive) = "<<err_adap/max_val<<'\n';
     std::cout<<"Error (compress) = "<<err_comp/max_val<<'\n';
     std::cout<<"Error (precond)  = "<<err_prec/max_val<<'\n';
