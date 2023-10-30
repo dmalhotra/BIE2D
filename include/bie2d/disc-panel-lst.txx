@@ -50,7 +50,7 @@ namespace sctl {
 
                 // Refine the near-region until the panel size is less than
                 // the square root of the distance between the discs
-                Long nlevels = (Long)ceil(log2(close_angle/sqrt(dist)));
+                Long nlevels = adap ? (Long)ceil(log2(close_angle/sqrt(dist))) : 4;
                 if (nlevels > 0)
                 {
                     theta_break[j].PushBack(theta_j);
