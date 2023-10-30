@@ -28,102 +28,98 @@ namespace sctl {
 
     // Adaptively construct panel breakpoints on each disc
     // TODO: This is currently O(Ndisc^2), but should be O(Ndisc) with a kd-tree
-    for (Long j = 0; j < Ndisc; j++)
-    {
-        for (Long k = j+1; k < Ndisc; k++)
-        {
-            Real dx = Xc[2*j]   - Xc[2*k];
-            Real dy = Xc[2*j+1] - Xc[2*k+1];
-            Real dist = std::sqrt(dx*dx + dy*dy) - 2*R;
-            if ( dist < close_threshold*R )
-            {
-                Real theta_j = std::fmod(std::atan2(dy,dx)+pi, 2*pi);
-                Real theta_k = std::fmod(theta_j+pi, 2*pi);
+    for (Long j = 0; j < Ndisc; j++) {
+      for (Long k = j+1; k < Ndisc; k++) {
 
-                // Add the endpoints of the near-region to the list of panel
-                // breakpoints for each disc
-                Long start_idx_j = theta_break[j].Dim();
-                Long start_idx_k = theta_break[k].Dim();
-                theta_break[j].PushBack(theta_j-c);
-                theta_break[j].PushBack(theta_j+c);
-                theta_break[k].PushBack(theta_k-c);
-                theta_break[k].PushBack(theta_k+c);
+        Real dx = Xc[2*j]   - Xc[2*k];
+        Real dy = Xc[2*j+1] - Xc[2*k+1];
+        Real dist = std::sqrt(dx*dx + dy*dy) - 2*R;
 
-                endpoints[j].PushBack(theta_j-c);
-                endpoints[j].PushBack(theta_j+c);
-                endpoints[k].PushBack(theta_k-c);
-                endpoints[k].PushBack(theta_k+c);
+        if (dist < close_threshold*R) {
 
-                // Refine the near-region until the panel size is less than
-                // the square root of the distance between the discs
-                Long nlevels = adap ? (Long)std::ceil(std::log2(close_angle/std::sqrt(dist))) : 2;
-                if (nlevels > 0)
-                {
-                    theta_break[j].PushBack(theta_j);
-                    theta_break[k].PushBack(theta_k);
-                }
-                Real cl = c;
-                for (Long l = 1; l < nlevels; l++)
-                {
-                    cl = 0.5*cl;
-                    theta_break[j].PushBack(theta_j-cl);
-                    theta_break[j].PushBack(theta_j+cl);
-                    theta_break[k].PushBack(theta_k-cl);
-                    theta_break[k].PushBack(theta_k+cl);
-                }
+          Real theta_j = std::fmod(std::atan2(dy,dx)+pi, 2*pi);
+          Real theta_k = std::fmod(theta_j+pi, 2*pi);
 
-                NearData neardata;
-                neardata.disc_idx0 = j;
-                neardata.disc_idx1 = k;
-                neardata.panel_idx_range0[0] = start_idx_j;
-                neardata.panel_idx_range0[1] = start_idx_j+1; // the next breakpoint after start_idx is the near-region's end
-                neardata.panel_idx_range1[0] = start_idx_k;
-                neardata.panel_idx_range1[1] = start_idx_k+1;
-                near_lst.PushBack(neardata);
-            }
+          // Add the endpoints of the near-region to the list of panel
+          // breakpoints for each disc
+          Long start_idx_j = theta_break[j].Dim();
+          Long start_idx_k = theta_break[k].Dim();
+          theta_break[j].PushBack(theta_j-c);
+          theta_break[j].PushBack(theta_j+c);
+          theta_break[k].PushBack(theta_k-c);
+          theta_break[k].PushBack(theta_k+c);
+
+          endpoints[j].PushBack(theta_j-c);
+          endpoints[j].PushBack(theta_j+c);
+          endpoints[k].PushBack(theta_k-c);
+          endpoints[k].PushBack(theta_k+c);
+
+          // Refine the near-region until the panel size is less than
+          // the square root of the distance between the discs
+          Long nlevels = adap ? (Long)std::ceil(std::log2(close_angle/std::sqrt(dist))) : 2;
+          if (nlevels > 0) {
+            theta_break[j].PushBack(theta_j);
+            theta_break[k].PushBack(theta_k);
+          }
+          Real cl = c;
+          for (Long l = 1; l < nlevels; l++) {
+            cl = 0.5*cl;
+            theta_break[j].PushBack(theta_j-cl);
+            theta_break[j].PushBack(theta_j+cl);
+            theta_break[k].PushBack(theta_k-cl);
+            theta_break[k].PushBack(theta_k+cl);
+          }
+
+          NearData neardata;
+          neardata.disc_idx0 = j;
+          neardata.disc_idx1 = k;
+          neardata.panel_idx_range0[0] = start_idx_j;
+          neardata.panel_idx_range0[1] = start_idx_j+1; // the next breakpoint after start_idx is the near-region's end
+          neardata.panel_idx_range1[0] = start_idx_k;
+          neardata.panel_idx_range1[1] = start_idx_k+1;
+          near_lst.PushBack(neardata);
         }
+      }
 
-        if (theta_break[j].Dim() == 0) {
-          theta_break[j].PushBack(0);
-          endpoints[j].PushBack(0);
-          endpoints[j].PushBack(0);
+      if (theta_break[j].Dim() == 0) {
+        theta_break[j].PushBack(0);
+        endpoints[j].PushBack(0);
+        endpoints[j].PushBack(0);
+      }
+
+      // Now refine the leftover regions (if needed)
+      std::sort(endpoints[j].begin(), endpoints[j].end());
+      for (Long i = 1; i < endpoints[j].Dim(); i+=2) {
+        Real theta0 = endpoints[j][i];
+        Real theta1 = (i < endpoints[j].Dim()-1 ? endpoints[j][i+1] : endpoints[j][0]+2*pi);
+        Real dt = theta1-theta0;
+        Long nuniform = (Long)std::ceil(dt/max_size);
+        dt /= nuniform;
+        for (Long l = 1; l < nuniform; l++) {
+            theta_break[j].PushBack(theta0+l*dt);
         }
+      }
 
-        // Now refine the leftover regions (if needed)
-        std::sort(endpoints[j].begin(), endpoints[j].end());
-        for (Long i = 1; i < endpoints[j].Dim(); i+=2)
-        {
-            Real theta0 = endpoints[j][i];
-            Real theta1 = (i < endpoints[j].Dim()-1 ? endpoints[j][i+1] : endpoints[j][0]+2*pi);
-            Real dt = theta1-theta0;
-            Long nuniform = (Long)std::ceil(dt/max_size);
-            dt /= nuniform;
-            for (Long l = 1; l < nuniform; l++)
-            {
-                theta_break[j].PushBack(theta0+l*dt);
-            }
-        }
+      // Create index vector that puts the breaks in sorted order
+      iforward.ReInit(theta_break[j].Dim());
+      for (Long i = 0; i < iforward.Dim(); i++) {
+        iforward[i] = i;
+      }
+      std::sort(iforward.begin(), iforward.end(), [&](Long ki, Long kj) {
+        return theta_break[j][ki] < theta_break[j][kj];
+      });
 
-        // Create index vector that puts the breaks in sorted order
-        iforward.ReInit(theta_break[j].Dim());
-        for (Long i = 0; i < iforward.Dim(); i++) {
-          iforward[i] = i;
-        }
-        std::sort(iforward.begin(), iforward.end(), [&](Long ki, Long kj) {
-          return theta_break[j][ki] < theta_break[j][kj];
-        });
+      // Create index vector that reverses the mapping
+      ireverse[j].ReInit(theta_break[j].Dim());
+      for (Long i = 0; i < theta_break[j].Dim(); i++) {
+        ireverse[j][iforward[i]] = i;
+      }
 
-        // Create index vector that reverses the mapping
-        ireverse[j].ReInit(theta_break[j].Dim());
-        for (Long i = 0; i < theta_break[j].Dim(); i++) {
-          ireverse[j][iforward[i]] = i;
-        }
+      // Do the actual sorting
+      std::sort(theta_break[j].begin(), theta_break[j].end());
 
-        // Do the actual sorting
-        std::sort(theta_break[j].begin(), theta_break[j].end());
-
-        // Add this disc's panels to the total number of panels
-        Npanel += theta_break[j].Dim();
+      // Add this disc's panels to the total number of panels
+      Npanel += theta_break[j].Dim();
     }
 
     // Update the near interaction list with the sorted indices
