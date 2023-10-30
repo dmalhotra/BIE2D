@@ -19,8 +19,9 @@ namespace sctl {
     Real dhairya = acos(0.5+close_threshold/4);
     Real close_angle = fac * std::min(dan, dhairya);
     Real c = 0.5*close_angle;
+    Real max_size = 0.5*close_angle;
 
-    Vector<Vector<Real>> breaks(Ndisc);
+    Vector<Vector<Real>> breaks(Ndisc), endpoints(Ndisc);
     Vector<Vector<Long>> ireverse(Ndisc);
     Vector<Long> iforward;
     Long Npanel = 0;
@@ -48,9 +49,14 @@ namespace sctl {
                 theta_break[k].PushBack(theta_k-c);
                 theta_break[k].PushBack(theta_k+c);
 
+                endpoints[j].PushBack(theta_j-c);
+                endpoints[j].PushBack(theta_j+c);
+                endpoints[k].PushBack(theta_k-c);
+                endpoints[k].PushBack(theta_k+c);
+
                 // Refine the near-region until the panel size is less than
                 // the square root of the distance between the discs
-                Long nlevels = adap ? (Long)ceil(log2(close_angle/sqrt(dist))) : 4;
+                Long nlevels = adap ? (Long)ceil(log2(close_angle/sqrt(dist))) : 2;
                 if (nlevels > 0)
                 {
                     theta_break[j].PushBack(theta_j);
@@ -74,6 +80,27 @@ namespace sctl {
                 neardata.panel_idx_range1[0] = start_idx_k;
                 neardata.panel_idx_range1[1] = theta_break[k].Dim()-1;
                 near_lst.PushBack(neardata);
+            }
+        }
+
+        if (theta_break[j].Dim() == 0) {
+          theta_break[j].PushBack(0);
+          endpoints[j].PushBack(0);
+          endpoints[j].PushBack(0);
+        }
+
+        // Now refine the leftover regions (if needed)
+        std::sort(endpoints[j].begin(), endpoints[j].end());
+        for (Long i = 1; i < endpoints[j].Dim(); i+=2)
+        {
+            Real theta0 = endpoints[j][i];
+            Real theta1 = (i < endpoints[j].Dim()-1 ? endpoints[j][i+1] : endpoints[j][0]+2*pi);
+            Real dt = theta1-theta0;
+            Long nuniform = (Long)ceil(dt/max_size);
+            dt /= nuniform;
+            for (Long l = 1; l < nuniform; l++)
+            {
+                theta_break[j].PushBack(theta0+l*dt);
             }
         }
 

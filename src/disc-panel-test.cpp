@@ -10,18 +10,19 @@ int main()
     Long Ndisc = 3;
     Real r = 0.5;
     Vector<Real> xy(2*Ndisc);
+    bool adap = true;
     
-    xy[0] = -0.51;
+    xy[0] = -0.501;
     xy[1] = 0;
 
-    xy[2] = 0.51;
+    xy[2] = 0.501;
     xy[3] = 0;
 
     xy[4] = 0;
     xy[5] = 1;
 
     DiscPanelLst<Real, Order> discs;
-    discs.Init(xy, r);
+    discs.Init(xy, r, adap);
 
     for (int i = 0; i < Ndisc; i++) {
         auto X = discs.SurfCoord(i);
