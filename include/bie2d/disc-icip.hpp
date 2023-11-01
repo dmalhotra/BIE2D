@@ -40,12 +40,32 @@ namespace sctl {
      */
     void Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type);
 
-    protected:
+    /**
+     * Apply the boundary integral operator.
+     */
+    void ApplyBIOp(Vector<Real>* U, const Vector<Real>& sigma) const;
+
+    /**
+     * Apply the block diagonal preconditioner.
+     */
+    void ApplyPrecond(Vector<Real>* U, const Vector<Real>& sigma) const;
 
     /**
      * To be used for naming precomputed data files.
      */
     virtual const std::string& Name() const = 0;
+
+    protected:
+
+    /**
+     * Apply the boundary integral operator directly on the current
+     * discretization (direct -- without preconditioning).
+     *
+     * @param[out] U result vector.
+     *
+     * @param[in] F density vector.
+     */
+    virtual void ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& F) const = 0;
 
     /**
      * Build interaction block for a given set of panels.
@@ -60,16 +80,6 @@ namespace sctl {
      * @param[in] tol accuracy tolerance.
      */
     virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order> panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const = 0;
-
-    /**
-     * Apply the boundary integral operator directly on the current
-     * discretization (direct -- without preconditioning).
-     *
-     * @param[out] U result vector.
-     *
-     * @param[in] F density vector.
-     */
-    virtual void ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& F) const = 0;
 
     /**
      * Compute the compressed preconditioner matrix-block for interaction
@@ -102,16 +112,6 @@ namespace sctl {
      * @param[in] M_lst list of small matrix-blocks.
      */
     static void ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order> panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst);
-
-    /**
-     * Apply the boundary integral operator.
-     */
-    void ApplyBIOp(Vector<Real>* U, const Vector<Real>& sigma) const;
-
-    /**
-     * Apply the block diagonal preconditioner.
-     */
-    void ApplyPrecond(Vector<Real>* U, const Vector<Real>& sigma) const;
 
     Comm comm;
     Real tol_;

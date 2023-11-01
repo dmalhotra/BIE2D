@@ -16,31 +16,12 @@ namespace sctl {
     const Long N = this->disc_panels.Size() * Order * COORD_DIM;
     const Real R = this->disc_panels.DiscRadius();
 
-    if (0) { // print operator matrix
-      Matrix<Real> M(N, N); M.SetZero();
-      for (Long i = 0; i < N; i++) {
-        Vector<Real> U(N, M[i], false);
-        Vector<Real> sigma(N); sigma.SetZero();
-        sigma[i] = 1;
-        this->ApplyBIOp(&U, sigma);
-      }
-      std::cout<<"B=[\n";
-      std::cout<<std::setprecision(16);
-      for (Long i = 0; i < M.Dim(0); i++) {
-        for (Long j = 0; j < M.Dim(1); j++) {
-          std::cout<<M[i][j]<<' ';
-        }
-        std::cout<<'\n';
-      }
-      std::cout<<"];\n";
-    }
-
     Vector<Real> nu; // boundary force
     { // Set nu
       nu.ReInit(N);
       Long offset = 0;
       for (Long i = 0; i < Ndisc; i++) {
-        const Long N_ = this->disc_panels.SurfCoord(i).Dim();
+        const Long N_ = this->disc_panels.SurfWts(i).Dim()*COORD_DIM;
         const Real inv_circumf = 1/(2*const_pi<Real>()*R);
         for (Long j = 0; j < N_; j++) {
           nu[offset+j] = 0;
@@ -82,7 +63,8 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> const std::string& DiscMobility<Real,Order>::Name() const {
-    static auto name = std::string("StokesMobility") + std::to_string(Order);
+    const double R = (double)this->disc_panels.DiscRadius();
+    static auto name = std::string("StokesMobility") + std::to_string(Order) + "-R" + std::to_string(R);
     return name;
   }
 

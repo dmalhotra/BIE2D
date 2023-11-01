@@ -5,6 +5,8 @@
 // Matrices are row-major order
 
 #include <sctl.hpp>
+#include <bie2d/disc-capacitance.hpp>
+#include <bie2d/disc-elastance.hpp>
 #include <bie2d/disc-mobility.hpp>
 #include <bie2d/disc-icip.hpp>
 #include <bie2d/kernels.hpp>
