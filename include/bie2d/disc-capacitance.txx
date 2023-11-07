@@ -1,18 +1,24 @@
 namespace sctl {
 
-  template <class Real, Integer Order> DiscCapacitance<Real,Order>::DiscCapacitance(const Comm& comm_) : ICIP_Base(comm_), LaplaceSL_BIOp(LaplaceSL_Ker, false, this->comm), LaplaceDL_BIOp(LaplaceDL_Ker, false, this->comm), solver(this->comm, true) {
-    LaplaceSL_BIOp.AddElemList(this->disc_panels, "disc-elems");
-    LaplaceDL_BIOp.AddElemList(this->disc_panels, "disc-elems");
-  }
+  template <class Real, Integer Order> DiscCapacitance<Real,Order>::DiscCapacitance(const Comm& comm_) : ICIP_Base(comm_), LaplaceSL_BIOp_near(LaplaceSL_Ker, false, this->comm), LaplaceSL_BIOp_far(LaplaceSL_Ker, false, this->comm), LaplaceDL_BIOp_near(LaplaceDL_Ker, false, this->comm), LaplaceDL_BIOp_far(LaplaceDL_Ker, false, this->comm), solver(this->comm, true) {}
 
   template <class Real, Integer Order> void DiscCapacitance<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
-    LaplaceSL_BIOp.DeleteElemList("disc-elems");
-    LaplaceDL_BIOp.DeleteElemList("disc-elems");
-    LaplaceSL_BIOp.AddElemList(this->disc_panels, "disc-elems");
-    LaplaceDL_BIOp.AddElemList(this->disc_panels, "disc-elems");
-    LaplaceSL_BIOp.SetAccuracy(tol);
-    LaplaceDL_BIOp.SetAccuracy(tol);
+
+    LaplaceSL_BIOp_near.AddElemList(this->panels_near);
+    LaplaceSL_BIOp_far .AddElemList(this->panels_far );
+    LaplaceDL_BIOp_near.AddElemList(this->panels_near);
+    LaplaceDL_BIOp_far .AddElemList(this->panels_far );
+
+    LaplaceSL_BIOp_near.SetAccuracy(tol);
+    LaplaceSL_BIOp_far .SetAccuracy(tol);
+    LaplaceDL_BIOp_near.SetAccuracy(tol);
+    LaplaceDL_BIOp_far .SetAccuracy(tol);
+
+    LaplaceSL_BIOp_near.SetTargetCoord(this->Xfar);
+    LaplaceSL_BIOp_far .SetTargetCoord(this->X   );
+    LaplaceDL_BIOp_near.SetTargetCoord(this->Xfar);
+    LaplaceDL_BIOp_far .SetTargetCoord(this->X   );
   }
 
   template <class Real, Integer Order> void DiscCapacitance<Real,Order>::Solve(Vector<Real>& Q, const Vector<Real> V, const Long gmres_max_iter) {
@@ -100,10 +106,29 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> void DiscCapacitance<Real,Order>::ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& sigma) const {
-    Vector<Real> Udl, Usl;
-    LaplaceDL_BIOp.ComputePotential(Udl, sigma);
-    LaplaceSL_BIOp.ComputePotential(Usl, sigma);
-    (*U) = 0.5 * sigma + Udl + Usl;
+    Vector<Real> sigma_near, sigma_far, sigma_far_;
+    this->Split(&sigma_near, &sigma_far, sigma);
+    this->Merge(&sigma_far_, Vector<Real>(), sigma_far);
+
+    Vector<Real> Udl;
+    LaplaceDL_BIOp_far .ComputePotential(Udl, sigma_far );
+    if (sigma_near.Dim()) {
+      Vector<Real> Udl_near, Udl_near_;
+      LaplaceDL_BIOp_near.ComputePotential(Udl_near, sigma_near);
+      this->Merge(&Udl_near_, Vector<Real>(), Udl_near);
+      Udl += Udl_near_;
+    }
+
+    Vector<Real> Usl;
+    LaplaceSL_BIOp_far .ComputePotential(Usl, sigma_far );
+    if (sigma_near.Dim()) {
+      Vector<Real> Usl_near, Usl_near_;
+      LaplaceSL_BIOp_near.ComputePotential(Usl_near, sigma_near);
+      this->Merge(&Usl_near_, Vector<Real>(), Usl_near);
+      Usl += Usl_near_;
+    }
+
+    (*U) = 0.5*sigma_far_ + Udl + Usl;
   }
 
 }

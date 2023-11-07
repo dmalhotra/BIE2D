@@ -83,7 +83,8 @@ namespace sctl {
     Stokes2D_FxU StokesSL_Ker; // Stokes SL kernel
     Stokes2D_DxU StokesDL_Ker; // Stokes DL kernel
     BoundaryIntegralOp<Real,Stokes2D_FxU> StokesSL_BIOp; // Stokes SL operator
-    BoundaryIntegralOp<Real,Stokes2D_DxU> StokesDL_BIOp; // Stokes DL operator
+    BoundaryIntegralOp<Real,Stokes2D_FxU> StokesSL_BIOp_near, StokesSL_BIOp_far; // Stokes SL operator
+    BoundaryIntegralOp<Real,Stokes2D_DxU> StokesDL_BIOp_near, StokesDL_BIOp_far; // Stokes DL operator
     ParallelSolver<Real> solver; // GMRES solver
     Matrix<Real> V0; // rigid velocity basis for each disc (dimensions = 3 x Nnodes*COORD_DIM)
   };

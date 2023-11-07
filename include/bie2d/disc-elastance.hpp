@@ -118,7 +118,8 @@ namespace sctl {
     Laplace2D_FxU LaplaceSL_Ker; // Laplace SL kernel
     Laplace2D_DxU LaplaceDL_Ker; // Laplace DL kernel
     BoundaryIntegralOp<Real,Laplace2D_FxU> LaplaceSL_BIOp; // Laplace SL operator
-    BoundaryIntegralOp<Real,Laplace2D_DxU> LaplaceDL_BIOp; // Laplace DL operator
+    BoundaryIntegralOp<Real,Laplace2D_FxU> LaplaceSL_BIOp_near, LaplaceSL_BIOp_far; // Laplace SL operator
+    BoundaryIntegralOp<Real,Laplace2D_DxU> LaplaceDL_BIOp_near, LaplaceDL_BIOp_far; // Laplace DL operator
     ParallelSolver<Real> solver; // GMRES solver
     Matrix<Real> V0; // rigid velocity basis for each disc (dimensions = 3 x Nnodes*COORD_DIM)
   };

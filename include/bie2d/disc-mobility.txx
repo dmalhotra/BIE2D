@@ -1,14 +1,27 @@
 namespace sctl {
 
-  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(StokesSL_Ker, false, this->comm), StokesDL_BIOp(StokesDL_Ker, false, this->comm), solver(this->comm, true) {}
+  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(StokesSL_Ker, false, this->comm), StokesSL_BIOp_near(StokesSL_Ker, false, this->comm), StokesSL_BIOp_far(StokesSL_Ker, false, this->comm), StokesDL_BIOp_near(StokesDL_Ker, false, this->comm), StokesDL_BIOp_far(StokesDL_Ker, false, this->comm), solver(this->comm, true) {}
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
     RigidVelocityBasis(V0, this->disc_panels);
-    StokesSL_BIOp.AddElemList(this->disc_panels);
-    StokesDL_BIOp.AddElemList(this->disc_panels);
-    StokesSL_BIOp.SetAccuracy(tol);
-    StokesDL_BIOp.SetAccuracy(tol);
+
+    StokesSL_BIOp     .AddElemList(this->disc_panels);
+    StokesSL_BIOp_near.AddElemList(this->panels_near);
+    StokesSL_BIOp_far .AddElemList(this->panels_far );
+    StokesDL_BIOp_near.AddElemList(this->panels_near);
+    StokesDL_BIOp_far .AddElemList(this->panels_far );
+
+    StokesSL_BIOp     .SetAccuracy(tol);
+    StokesSL_BIOp_near.SetAccuracy(tol);
+    StokesSL_BIOp_far .SetAccuracy(tol);
+    StokesDL_BIOp_near.SetAccuracy(tol);
+    StokesDL_BIOp_far .SetAccuracy(tol);
+
+    StokesSL_BIOp_near.SetTargetCoord(this->Xfar);
+    StokesSL_BIOp_far .SetTargetCoord(this->X   );
+    StokesDL_BIOp_near.SetTargetCoord(this->Xfar);
+    StokesDL_BIOp_far .SetTargetCoord(this->X   );
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real> F, const Vector<Real> Vs, const Long gmres_max_iter) {
@@ -135,31 +148,65 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& sigma) const {
-    U->SetZero();
-    StokesDL_BIOp.ComputePotential(*U, sigma);
-    (*U) += 0.5 * sigma;
+    Vector<Real> sigma_near, sigma_far;
+    Vector<Real> sigma_near_, sigma_far_;
+    this->Split(&sigma_near, &sigma_far, sigma);
+    this->Merge(&sigma_near_, sigma_near, Vector<Real>());
+    this->Merge(&sigma_far_, Vector<Real>(), sigma_far);
+
+    Vector<Real> Udl;
+    StokesDL_BIOp_far .ComputePotential(Udl, sigma_far );
+    if (sigma_near_.Dim()) {
+      Vector<Real> Udl_near, Udl_near_;
+      StokesDL_BIOp_near.ComputePotential(Udl_near, sigma_near);
+      this->Merge(&Udl_near_, Vector<Real>(), Udl_near);
+      Udl += Udl_near_;
+    }
+    (*U) = 0.5*sigma_far_ + Udl;
 
     Long offset = 0;
+    Vector<Real> VVt_near(U->Dim());
+    Vector<Real> VVt_far (U->Dim());
     for (Long k = 0; k < this->disc_panels.DiscCount(); k++) {
       const Real inv_circumf = 1/(2*const_pi<Real>()*this->disc_panels.DiscRadius());
       const auto& wts = this->disc_panels.SurfWts(k);
       const Long N = wts.Dim();
 
-      Vector<Real> I(3); I = 0;
-      for (Long i = 0; i < N; i++) {
-        for (Long j = 0; j < 3; j++) {
-          I[j] += wts[i] * sigma[offset+i*COORD_DIM+0] * V0[j][offset+i*COORD_DIM+0];
-          I[j] += wts[i] * sigma[offset+i*COORD_DIM+1] * V0[j][offset+i*COORD_DIM+1];
+      Vector<Real> In(3); In = 0;
+      Vector<Real> If(3); If = 0;
+      if (sigma_near_.Dim()) {
+        for (Long i = 0; i < N; i++) {
+          for (Long j = 0; j < 3; j++) {
+            In[j] += wts[i] * sigma_near_[offset+i*COORD_DIM+0] * V0[j][offset+i*COORD_DIM+0];
+            In[j] += wts[i] * sigma_near_[offset+i*COORD_DIM+1] * V0[j][offset+i*COORD_DIM+1];
+          }
         }
       }
-      I *= inv_circumf;
-      for (Long i = 0; i < N*COORD_DIM; i++) {
+      for (Long i = 0; i < N; i++) {
         for (Long j = 0; j < 3; j++) {
-          (*U)[offset+i] += V0[j][offset+i] * I[j];
+          If[j] += wts[i] * sigma_far_[offset+i*COORD_DIM+0] * V0[j][offset+i*COORD_DIM+0];
+          If[j] += wts[i] * sigma_far_[offset+i*COORD_DIM+1] * V0[j][offset+i*COORD_DIM+1];
+        }
+      }
+      In *= inv_circumf;
+      If *= inv_circumf;
+
+      for (Long i = 0; i < N*COORD_DIM; i++) {
+        VVt_near[offset+i] = 0;
+        VVt_far [offset+i] = 0;
+        for (Long j = 0; j < 3; j++) {
+          VVt_near[offset+i] += V0[j][offset+i] * In[j];
+          VVt_far [offset+i] += V0[j][offset+i] * If[j];
         }
       }
       offset += N*COORD_DIM;
     }
+    { // Set near-near block of VVt_near to zero
+      Vector<Real> Vtmp;
+      this->Split(nullptr, &Vtmp, VVt_near);
+      this->Merge(&VVt_near, Vector<Real>(), Vtmp);
+    }
+    (*U) += VVt_near + VVt_far;
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::RigidVelocityBasis(Matrix<Real>& V, const DiscPanelLst<Real,Order>& disc_panels, const Long disc_idx) {

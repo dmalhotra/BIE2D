@@ -40,6 +40,8 @@ namespace sctl {
      */
     void Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type);
 
+    const DiscPanelLst<Real,Order>& GetPanelList() const;
+
     /**
      * Apply the boundary integral operator.
      */
@@ -59,7 +61,8 @@ namespace sctl {
 
     /**
      * Apply the boundary integral operator directly on the current
-     * discretization (direct -- without preconditioning).
+     * discretization (direct -- without preconditioning). Excludes the
+     * near-near block when icip_type != ICIPType::Adaptive
      *
      * @param[out] U result vector.
      *
@@ -113,12 +116,21 @@ namespace sctl {
      */
     static void ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order> panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst);
 
+    void Split(Vector<Real>* v_near, Vector<Real>* v_far, const Vector<Real>& v) const;
+
+    void Merge(Vector<Real>* v, const Vector<Real>& v_near, const Vector<Real>& v_far) const;
+
     Comm comm;
     Real tol_;
     ICIPType icip_type_;
     DiscPanelLst<Real,Order> disc_panels;
     mutable Vector<Matrix<Real>> Kcorrec; // blocks to add to Kc
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
+
+    Vector<Long> near_dsp_orig, near_dsp, near_cnt;
+    Vector<Long> far_dsp_orig, far_dsp, far_cnt;
+    PanelLst<Real,Order> panels_near, panels_far;
+    Vector<Real> X, Xnear, Xfar;
   };
 
   template <class Real, Integer Order> constexpr Real ICIP<Real,Order>::d_max;

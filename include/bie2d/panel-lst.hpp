@@ -114,10 +114,10 @@ namespace sctl {
         M.ReInit(Npanel_*Order*KDIM0, Nt*KDIM1);
       }
 
-      #pragma omp parallel for schedule(static)
+      #pragma omp parallel for schedule(static) collapse(2)
       for (Long t = 0; t < Nt; t++) {
-        const Tensor<Real,false,COORD_DIM> Xt_((Iterator<Real>)Xt.begin()+t*COORD_DIM);
         for (Long i = panel_start; i < panel_end_; i++) {
+          const Tensor<Real,false,COORD_DIM> Xt_((Iterator<Real>)Xt.begin()+t*COORD_DIM);
           Tensor<Real,true,Order,COORD_DIM> XX;
           for (Long j = 0; j < Order; j++) { // Set XX
             for (Integer k = 0; k < COORD_DIM; k++) {
@@ -206,7 +206,7 @@ namespace sctl {
         for (Long j = 0; j < Order; j++) {
           const Long node_idx = i * Order + j;
           Real dxds = sqrt<Real>(dX_[node_idx*COORD_DIM+0]*dX_[node_idx*COORD_DIM+0] + dX_[node_idx*COORD_DIM+1]*dX_[node_idx*COORD_DIM+1]);
-          dist_far[node_idx] = dist_far_gauss[j] * dxds;
+          dist_far[node_idx] = dist_far_gauss[j] * dxds*2;
         }
       }
     }
@@ -263,31 +263,37 @@ namespace sctl {
 
       if (M_lst.Dim() != Npanel) M_lst.ReInit(Npanel);
       if (tol > 1e-3) {
+        #pragma omp parallel for schedule(static)
         for (Long i = 0; i < Npanel; i++) {
           const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
           panel_lst.template LayerPotentialMatrix<Kernel,3>(M_lst[i], Xt, tol, i, i+1);
         }
       } else if (tol > 1e-6) {
+        #pragma omp parallel for schedule(static)
         for (Long i = 0; i < Npanel; i++) {
           const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
           panel_lst.template LayerPotentialMatrix<Kernel,6>(M_lst[i], Xt, tol, i, i+1);
         }
       } else if (tol > 1e-9) {
+        #pragma omp parallel for schedule(static)
         for (Long i = 0; i < Npanel; i++) {
           const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
           panel_lst.template LayerPotentialMatrix<Kernel,9>(M_lst[i], Xt, tol, i, i+1);
         }
       } else if (tol > 1e-12) {
+        #pragma omp parallel for schedule(static)
         for (Long i = 0; i < Npanel; i++) {
           const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
           panel_lst.template LayerPotentialMatrix<Kernel,12>(M_lst[i], Xt, tol, i, i+1);
         }
       } else if (tol > 1e-15) {
+        #pragma omp parallel for schedule(static)
         for (Long i = 0; i < Npanel; i++) {
           const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
           panel_lst.template LayerPotentialMatrix<Kernel,15>(M_lst[i], Xt, tol, i, i+1);
         }
       } else {
+        #pragma omp parallel for schedule(static)
         for (Long i = 0; i < Npanel; i++) {
           const Vector<Real> Xt(Order*COORD_DIM, (Iterator<Real>)panel_lst.X_.begin() + i*Order*COORD_DIM, false);
           panel_lst.template LayerPotentialMatrix<Kernel,-1>(M_lst[i], Xt, tol, i, i+1);
@@ -296,7 +302,7 @@ namespace sctl {
     }
 
     /**
-     * Compute near-interaction operator for a given element-idx and each each target.
+     * Compute near-interaction operator for a given element-idx and each target.
      *
      * @param[out] M the near-interaction matrix (in row-major format).
      *
