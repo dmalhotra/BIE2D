@@ -37,7 +37,7 @@ namespace sctl {
     }
 
     Vector<Real> sigma, sigma_; // unknown density
-    const auto LaplaceCapacOp = [this](Vector<Real>* U, const Vector<Real> sigma) {
+    const auto LaplaceCapacOp = [this](Vector<Real>* U, const Vector<Real>& sigma) {
       this->ApplyBIOp(U, sigma);
     };
     solver(&sigma_, LaplaceCapacOp, v, this->tol_, gmres_max_iter);

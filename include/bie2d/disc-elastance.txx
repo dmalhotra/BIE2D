@@ -44,11 +44,10 @@ namespace sctl {
     LaplaceSL_BIOp.ComputePotential(U0, nu);
 
     Vector<Real> sigma, sigma_; // unknown density
-    const auto LaplaceElastOp = [this](Vector<Real>* U, const Vector<Real> sigma) {
+    const auto LaplaceElastOp = [this](Vector<Real>* U, const Vector<Real>& sigma) {
       this->ApplyBIOp(U, sigma);
     };
     solver(&sigma_, LaplaceElastOp, U0, this->tol_, gmres_max_iter);
-
     this->ApplyPrecond(&sigma, sigma_);
 
     if (V.Dim() != Ndisc) V.ReInit(Ndisc);

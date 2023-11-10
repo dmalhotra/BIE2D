@@ -50,7 +50,7 @@ namespace sctl {
     StokesSL_BIOp.ComputePotential(U0, nu);
 
     Vector<Real> sigma, sigma_; // unknown density
-    const auto StokesMobilOp = [this](Vector<Real>* U, const Vector<Real> sigma) {
+    const auto StokesMobilOp = [this](Vector<Real>* U, const Vector<Real>& sigma) {
       this->ApplyBIOp(U, sigma);
     };
     solver(&sigma_, StokesMobilOp, U0, this->tol_, gmres_max_iter);
