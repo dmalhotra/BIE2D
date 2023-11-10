@@ -11,6 +11,7 @@ namespace sctl {
 
     const Long Ndisc = Xc.Dim() / COORD_DIM;
     theta_break.ReInit(Ndisc);
+    for (auto& t : theta_break) t.ReInit(0);
 
     const Real pi = const_pi<Real>();
     Real fac = 1;
@@ -28,6 +29,7 @@ namespace sctl {
 
     // Adaptively construct panel breakpoints on each disc
     // TODO: This is currently O(Ndisc^2), but should be O(Ndisc) with a kd-tree
+    near_lst.ReInit(0);
     for (Long j = 0; j < Ndisc; j++) {
       for (Long k = j+1; k < Ndisc; k++) {
 
