@@ -40,7 +40,7 @@ namespace sctl {
      *
      * @param[in] gmres_max_iter maximum number of GMRES iterations.
      */
-    void Solve(Vector<Real>& V, const Vector<Real> Q, const Long gmres_max_iter);
+    void Solve(Vector<Real>& V, const Vector<Real>& Q, const Real gmres_tol, const Long gmres_max_iter);
 
     template <class RefReal> static void test(const Real R = 0.75, const Real eps = 1e-5, const Real tol = machine_eps<Real>(), const Long gmres_iter = 1000, const Comm comm = Comm::Self()) {
       const Long Ndisc = 2;
@@ -60,18 +60,18 @@ namespace sctl {
       };
 
       Vector<RefReal> V0; // reference solution
-      DiscElastance<RefReal,Order+8> capacitance0(comm);
-      capacitance0.Init(real2quad(X), R, tol*1e-2, ICIPType::Adaptive);
-      capacitance0.Solve(V0, real2quad(Q), gmres_iter);
+      DiscElastance<RefReal,Order+8> elastance0(comm);
+      elastance0.Init(real2quad(X), R, tol*1e-2, ICIPType::Adaptive);
+      elastance0.Solve(V0, real2quad(Q), tol*1e-2, gmres_iter);
 
       Vector<Real> V1, V2, V3;
-      DiscElastance<Real,Order> capacitance(comm);
-      capacitance.Init(X, R, tol, ICIPType::Adaptive);
-      capacitance.Solve(V1, Q, gmres_iter);
-      capacitance.Init(X, R, tol, ICIPType::Compress);
-      capacitance.Solve(V2, Q, gmres_iter);
-      capacitance.Init(X, R, tol, ICIPType::Precond );
-      capacitance.Solve(V3, Q, gmres_iter);
+      DiscElastance<Real,Order> elastance(comm);
+      elastance.Init(X, R, tol, ICIPType::Adaptive);
+      elastance.Solve(V1, Q, tol, gmres_iter);
+      elastance.Init(X, R, tol, ICIPType::Compress);
+      elastance.Solve(V2, Q, tol, gmres_iter);
+      elastance.Init(X, R, tol, ICIPType::Precond );
+      elastance.Solve(V3, Q, tol, gmres_iter);
 
       Real err_adap = 0, err_comp = 0, err_prec = 0, max_val = 0;
       for (const auto x : V0) max_val = std::max<Real>(max_val, fabs((Real)x));
@@ -120,7 +120,6 @@ namespace sctl {
     BoundaryIntegralOp<Real,Laplace2D_FxU> LaplaceSL_BIOp; // Laplace SL operator
     BoundaryIntegralOp<Real,Laplace2D_FxU> LaplaceSL_BIOp_near, LaplaceSL_BIOp_far; // Laplace SL operator
     BoundaryIntegralOp<Real,Laplace2D_DxU> LaplaceDL_BIOp_near, LaplaceDL_BIOp_far; // Laplace DL operator
-    ParallelSolver<Real> solver; // GMRES solver
     Matrix<Real> V0; // rigid velocity basis for each disc (dimensions = 3 x Nnodes*COORD_DIM)
   };
 

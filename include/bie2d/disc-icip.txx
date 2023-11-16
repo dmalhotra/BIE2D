@@ -1,6 +1,6 @@
 namespace sctl {
 
-  template <class Real, Integer Order> ICIP<Real,Order>::ICIP(const Comm& comm_) : comm(comm_) {}
+  template <class Real, Integer Order> ICIP<Real,Order>::ICIP(const Comm& comm_) : comm(comm_), solver(comm, true) {}
 
   template <class Real, Integer Order> ICIP<Real,Order>::~ICIP() {}
 
@@ -332,6 +332,47 @@ namespace sctl {
     } else {
       (*U) = sigma; // identity
     }
+  }
+
+  template <class Real, Integer Order> void ICIP<Real,Order>::SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) {
+    const Long N = rhs.Dim();
+    Vector<Real> rhs_ = rhs;
+    SqrtScaling(rhs_);
+
+    Vector<Real> sigma_;
+    const auto BIOp = [this](Vector<Real>* U, const Vector<Real>& sigma) {
+      auto sigma_ = sigma;
+      InvSqrtScaling(sigma_);
+      this->ApplyBIOp(U, sigma_);
+      SqrtScaling(*U);
+    };
+    if (gmres_tol < 0) {
+      Matrix<Real> M(N, N);
+      { // Set M
+        Vector<Real> x(N);
+        for (Long i = 0; i < N; i++) {
+          x.SetZero(); x[i] = 1;
+          Vector<Real> U(N, M[i], false); U = 0;
+          BIOp(&U, x);
+          //std::cout<<i<<' '<<N<<'\n';
+        }
+        //std::string fname = std::string("M_mobil_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ?
+        //if (std::is_same<Real,QuadReal>::value) M.Write(fname.c_str());
+      }
+
+      Matrix<Real> MM = Matrix<Real>(M).pinv(machine_eps<Real>());
+      //std::string fname = std::string("Minv_mobil_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ?
+      //if (std::is_same<Real,QuadReal>::value) MM.Write(fname.c_str());
+
+      const Matrix<Real> rhs__(1, rhs_.Dim(), rhs_.begin());
+      Matrix<Real> sigma = rhs__ * MM;
+      sigma_ = Vector<Real>(sigma.Dim(1), sigma.begin(), false);
+    } else {
+      solver(&sigma_, BIOp, rhs_, gmres_tol, gmres_max_iter);
+    }
+
+    InvSqrtScaling(sigma_);
+    this->ApplyPrecond(&sigma, sigma_);
   }
 
   template <class Real, Integer Order> void ICIP<Real,Order>::Split(Vector<Real>* v_near, Vector<Real>* v_far, const Vector<Real>& v) const {

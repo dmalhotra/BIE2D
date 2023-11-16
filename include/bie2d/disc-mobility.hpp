@@ -42,7 +42,7 @@ namespace sctl {
      *
      * @param[in] gmres_max_iter maximum number of GMRES iterations.
      */
-    void Solve(Vector<Real>& V, const Vector<Real> F, const Vector<Real> Vs, const Long gmres_max_iter);
+    void Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter);
 
     private:
 
@@ -85,7 +85,6 @@ namespace sctl {
     BoundaryIntegralOp<Real,Stokes2D_FxU> StokesSL_BIOp; // Stokes SL operator
     BoundaryIntegralOp<Real,Stokes2D_FxU> StokesSL_BIOp_near, StokesSL_BIOp_far; // Stokes SL operator
     BoundaryIntegralOp<Real,Stokes2D_DxU> StokesDL_BIOp_near, StokesDL_BIOp_far; // Stokes DL operator
-    ParallelSolver<Real> solver; // GMRES solver
     Matrix<Real> V0; // rigid velocity basis for each disc (dimensions = 3 x Nnodes*COORD_DIM)
   };
 

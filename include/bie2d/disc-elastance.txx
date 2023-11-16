@@ -1,6 +1,6 @@
 namespace sctl {
 
-  template <class Real, Integer Order> DiscElastance<Real,Order>::DiscElastance(const Comm& comm_) : ICIP_Base(comm_), LaplaceSL_BIOp(LaplaceSL_Ker, false, this->comm), LaplaceSL_BIOp_near(LaplaceSL_Ker, false, this->comm), LaplaceSL_BIOp_far(LaplaceSL_Ker, false, this->comm), LaplaceDL_BIOp_near(LaplaceDL_Ker, false, this->comm), LaplaceDL_BIOp_far(LaplaceDL_Ker, false, this->comm), solver(this->comm, true) {}
+  template <class Real, Integer Order> DiscElastance<Real,Order>::DiscElastance(const Comm& comm_) : ICIP_Base(comm_), LaplaceSL_BIOp(LaplaceSL_Ker, false, this->comm), LaplaceSL_BIOp_near(LaplaceSL_Ker, false, this->comm), LaplaceSL_BIOp_far(LaplaceSL_Ker, false, this->comm), LaplaceDL_BIOp_near(LaplaceDL_Ker, false, this->comm), LaplaceDL_BIOp_far(LaplaceDL_Ker, false, this->comm) {}
 
   template <class Real, Integer Order> void DiscElastance<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
@@ -22,7 +22,7 @@ namespace sctl {
     LaplaceDL_BIOp_far .SetTargetCoord(this->X   );
   }
 
-  template <class Real, Integer Order> void DiscElastance<Real,Order>::Solve(Vector<Real>& V, const Vector<Real> Q, const Long gmres_max_iter) {
+  template <class Real, Integer Order> void DiscElastance<Real,Order>::Solve(Vector<Real>& V, const Vector<Real>& Q, const Real gmres_tol, const Long gmres_max_iter) {
     const Long Ndisc = this->disc_panels.DiscCount();
     const Long N = this->disc_panels.Size() * Order;
     const Real R = this->disc_panels.DiscRadius();
@@ -43,12 +43,8 @@ namespace sctl {
     Vector<Real> U0; // completion flow velocity
     LaplaceSL_BIOp.ComputePotential(U0, nu);
 
-    Vector<Real> sigma, sigma_; // unknown density
-    const auto LaplaceElastOp = [this](Vector<Real>* U, const Vector<Real>& sigma) {
-      this->ApplyBIOp(U, sigma);
-    };
-    solver(&sigma_, LaplaceElastOp, U0, this->tol_, gmres_max_iter);
-    this->ApplyPrecond(&sigma, sigma_);
+    Vector<Real> sigma; // unknown density
+    this->SolveBIE(sigma, U0, gmres_tol, gmres_max_iter);
 
     if (V.Dim() != Ndisc) V.ReInit(Ndisc);
     { // get average of potential

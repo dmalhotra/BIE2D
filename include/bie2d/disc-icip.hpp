@@ -116,6 +116,27 @@ namespace sctl {
      */
     static void ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order> panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst);
 
+    /**
+     * Solve the boundary integral equation.
+     *
+     * @param[out] sigma solution density.
+     *
+     * @param[in] rhs the right-hand-side of BIE.
+     *
+     * @param[in] gmres_tol relative tolerance for GMRES. If gmres_tol==-1,
+     * then build the matrix and invert directly.
+     *
+     * @param[in] gmres_max_iter maximum number of GMRES iterations.
+     */
+    void SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter);
+
+    void SqrtScaling(Vector<Real>& v) {
+      //TODO
+    }
+    void InvSqrtScaling(Vector<Real>& v) {
+      //TODO
+    }
+
     void Split(Vector<Real>* v_near, Vector<Real>* v_far, const Vector<Real>& v) const;
 
     void Merge(Vector<Real>* v, const Vector<Real>& v_near, const Vector<Real>& v_far) const;
@@ -126,6 +147,7 @@ namespace sctl {
     DiscPanelLst<Real,Order> disc_panels;
     mutable Vector<Matrix<Real>> Kcorrec; // blocks to add to Kc
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
+    ParallelSolver<Real> solver; // GMRES solver
 
     Vector<Long> near_dsp_orig, near_dsp, near_cnt;
     Vector<Long> far_dsp_orig, far_dsp, far_cnt;

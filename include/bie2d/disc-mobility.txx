@@ -1,6 +1,6 @@
 namespace sctl {
 
-  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(StokesSL_Ker, false, this->comm), StokesSL_BIOp_near(StokesSL_Ker, false, this->comm), StokesSL_BIOp_far(StokesSL_Ker, false, this->comm), StokesDL_BIOp_near(StokesDL_Ker, false, this->comm), StokesDL_BIOp_far(StokesDL_Ker, false, this->comm), solver(this->comm, true) {}
+  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(StokesSL_Ker, false, this->comm), StokesSL_BIOp_near(StokesSL_Ker, false, this->comm), StokesSL_BIOp_far(StokesSL_Ker, false, this->comm), StokesDL_BIOp_near(StokesDL_Ker, false, this->comm), StokesDL_BIOp_far(StokesDL_Ker, false, this->comm) {}
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
@@ -24,7 +24,7 @@ namespace sctl {
     StokesDL_BIOp_far .SetTargetCoord(this->X   );
   }
 
-  template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real> F, const Vector<Real> Vs, const Long gmres_max_iter) {
+  template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter) {
     const Long Ndisc = this->disc_panels.DiscCount();
     const Long N = this->disc_panels.Size() * Order * COORD_DIM;
     const Real R = this->disc_panels.DiscRadius();
@@ -49,12 +49,8 @@ namespace sctl {
     Vector<Real> U0; // completion flow velocity
     StokesSL_BIOp.ComputePotential(U0, nu);
 
-    Vector<Real> sigma, sigma_; // unknown density
-    const auto StokesMobilOp = [this](Vector<Real>* U, const Vector<Real>& sigma) {
-      this->ApplyBIOp(U, sigma);
-    };
-    solver(&sigma_, StokesMobilOp, U0, this->tol_, gmres_max_iter);
-    this->ApplyPrecond(&sigma, sigma_);
+    Vector<Real> sigma; // unknown density
+    this->SolveBIE(sigma, U0, gmres_tol, gmres_max_iter);
 
     if (V.Dim() != Ndisc*3) V.ReInit(Ndisc*3);
     { // recover translation and rotation from sigma
