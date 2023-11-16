@@ -59,6 +59,18 @@ namespace sctl {
       panels_near.Init(Xnear);
       panels_far.Init(Xfar);
     }
+
+    { // Set sqrt_wts, rsqrt_wts
+      const auto& wts = disc_panels.SurfWts(-1);
+      const Long N = wts.Dim();
+      if ( sqrt_wts.Dim() != N)  sqrt_wts.ReInit(N);
+      if (rsqrt_wts.Dim() != N) rsqrt_wts.ReInit(N);
+      for (Long i = 0; i < N; i++) {
+        const Real sqrt_w = sqrt<Real>(wts[i]);
+        sqrt_wts[i] = sqrt_w;
+        rsqrt_wts[i] = 1/sqrt_w;
+      }
+    }
   }
 
   template <class Real, Integer Order> const DiscPanelLst<Real,Order>& ICIP<Real,Order>::GetPanelList() const {
@@ -221,7 +233,8 @@ namespace sctl {
     }
   }
 
-  template <class Real, Integer Order> void ICIP<Real,Order>::GetPrecondBlock(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius, const Real tol) const {
+  template <class Real, Integer Order> void ICIP<Real,Order>::GetPrecondBlock(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius) const {
+    Real tol = machine_eps<Real>();
     BuildCompression(R, Rinv, x0, y0, x1, y1, radius, tol); // compute compression on-the-fly
 
     // @Mariana TODO: get R and Rinv from interpolation instead of computing on-the-fly.
@@ -248,9 +261,9 @@ namespace sctl {
         std::tie(x1, y1) = disc_panels.DiscCoord(near_lst[i].disc_idx1);
 
         if (icip_type_ == ICIPType::Compress) {
-          GetPrecondBlock(nullptr, &Kcorrec[i], x0, y0, x1, y1, disc_panels.DiscRadius(), tol_);
+          GetPrecondBlock(nullptr, &Kcorrec[i], x0, y0, x1, y1, disc_panels.DiscRadius());
         } else if (icip_type_ == ICIPType::Precond) {
-          GetPrecondBlock(&Rprecon[i], nullptr, x0, y0, x1, y1, disc_panels.DiscRadius(), tol_);
+          GetPrecondBlock(&Rprecon[i], nullptr, x0, y0, x1, y1, disc_panels.DiscRadius());
         }
       }
     }
@@ -334,7 +347,7 @@ namespace sctl {
     }
   }
 
-  template <class Real, Integer Order> void ICIP<Real,Order>::SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) {
+  template <class Real, Integer Order> void ICIP<Real,Order>::SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) const {
     const Long N = rhs.Dim();
     Vector<Real> rhs_ = rhs;
     SqrtScaling(rhs_);
@@ -470,6 +483,26 @@ namespace sctl {
           (*v)[offset_orig+j] = 0;
         }
       }
+    }
+  }
+
+  template <class Real, Integer Order> void ICIP<Real,Order>::SqrtScaling(Vector<Real>& v) const {
+    const Long N = sqrt_wts.Dim();
+    const Long dof = v.Dim() / N;
+    SCTL_ASSERT(v.Dim() == N * dof);
+    for (Long i = 0; i < N; i++) {
+      const Real s = sqrt_wts[i];
+      for (Long k = 0; k < dof; k++) v[i*dof+k] *= s;
+    }
+  }
+
+  template <class Real, Integer Order> void ICIP<Real,Order>::InvSqrtScaling(Vector<Real>& v) const {
+    const Long N = rsqrt_wts.Dim();
+    const Long dof = v.Dim() / N;
+    SCTL_ASSERT(v.Dim() == N * dof);
+    for (Long i = 0; i < N; i++) {
+      const Real s = rsqrt_wts[i];
+      for (Long k = 0; k < dof; k++) v[i*dof+k] *= s;
     }
   }
 

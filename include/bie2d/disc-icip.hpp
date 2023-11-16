@@ -94,7 +94,7 @@ namespace sctl {
      * Computed the compressed preconditioner from interpolation at
      * log-Legendre nodes. Cache matrices at interpolation nodes to files.
      */
-    void GetPrecondBlock(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius, const Real tol) const;
+    void GetPrecondBlock(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius) const;
 
     /**
      * Build the preconditioner and correction blocks (Kcorrec, Rprecon)
@@ -128,14 +128,23 @@ namespace sctl {
      *
      * @param[in] gmres_max_iter maximum number of GMRES iterations.
      */
-    void SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter);
+    void SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) const;
 
-    void SqrtScaling(Vector<Real>& v) {
-      //TODO
-    }
-    void InvSqrtScaling(Vector<Real>& v) {
-      //TODO
-    }
+    /**
+     * L2 weighting or scaling by the square-root of the surface quadrature
+     * weights.
+     *
+     * \param[in,out] vector to be scaled.
+     */
+    void SqrtScaling(Vector<Real>& v) const;
+
+    /**
+     * Inverse L2 weighting or scaling by the reciprocal square-root of the
+     * surface quadrature weights.
+     *
+     * \param[in,out] vector to be scaled.
+     */
+    void InvSqrtScaling(Vector<Real>& v) const;
 
     void Split(Vector<Real>* v_near, Vector<Real>* v_far, const Vector<Real>& v) const;
 
@@ -145,9 +154,10 @@ namespace sctl {
     Real tol_;
     ICIPType icip_type_;
     DiscPanelLst<Real,Order> disc_panels;
+    Vector<Real> sqrt_wts, rsqrt_wts; // weights for L2 weighting
     mutable Vector<Matrix<Real>> Kcorrec; // blocks to add to Kc
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
-    ParallelSolver<Real> solver; // GMRES solver
+    mutable ParallelSolver<Real> solver; // GMRES solver
 
     Vector<Long> near_dsp_orig, near_dsp, near_cnt;
     Vector<Long> far_dsp_orig, far_dsp, far_cnt;
