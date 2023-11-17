@@ -14,10 +14,10 @@ namespace sctl {
     for (auto& t : theta_break) t.ReInit(0);
 
     const Real pi = const_pi<Real>();
-    Real fac = 1;
+    Real fac = 0.99;
     Real close_threshold = 0.5;
-    Real dan = 2*std::asin(1/(2+close_threshold));
-    Real dhairya = std::acos(0.5+close_threshold/4);
+    Real dan = 2*asin<Real>(1/(2+close_threshold));
+    Real dhairya = acos<Real>(0.5+close_threshold/4);
     Real close_angle = fac * std::min(dan, dhairya);
     Real c = 0.5*close_angle;
     Real max_size = 0.5*close_angle;
@@ -35,12 +35,12 @@ namespace sctl {
 
         Real dx = Xc[2*j]   - Xc[2*k];
         Real dy = Xc[2*j+1] - Xc[2*k+1];
-        Real dist = std::sqrt(dx*dx + dy*dy) - 2*R;
+        Real dist = sqrt<Real>(dx*dx + dy*dy) - 2*R;
 
         if (dist < close_threshold*R) {
 
-          Real theta_j = std::fmod(std::atan2(dy,dx)+pi, 2*pi);
-          Real theta_k = std::fmod(theta_j+pi, 2*pi);
+          Real theta_k = atan2<Real>(dy, dx); // in [-pi, pi]
+          Real theta_j = (theta_k < 0 ? theta_k+pi : theta_k-pi); // in [-pi, pi]
 
           // Add the endpoints of the near-region to the list of panel
           // breakpoints for each disc
@@ -58,7 +58,7 @@ namespace sctl {
 
           // Refine the near-region until the panel size is less than
           // the square root of the distance between the discs
-          Long nlevels = adap ? (Long)std::ceil(std::log2(close_angle/std::sqrt(dist))) : 2;
+          Long nlevels = adap ? (Long)(2+log2<Real>(close_threshold*R/dist)) : 2;
           if (nlevels > 0) {
             theta_break[j].PushBack(theta_j);
             theta_break[k].PushBack(theta_k);
@@ -95,7 +95,7 @@ namespace sctl {
         Real theta0 = endpoints[j][i];
         Real theta1 = (i < endpoints[j].Dim()-1 ? endpoints[j][i+1] : endpoints[j][0]+2*pi);
         Real dt = theta1-theta0;
-        Long nuniform = (Long)std::ceil(dt/max_size);
+        Long nuniform = (Long)ceil<Real>(dt/max_size);
         dt /= nuniform;
         for (Long l = 1; l < nuniform; l++) {
             theta_break[j].PushBack(theta0+l*dt);
