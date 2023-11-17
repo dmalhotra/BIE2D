@@ -37,10 +37,10 @@ namespace sctl {
      *
      * @param[in] adap whether to generate adaptive or coarse discretization.
      *
-     * @param[in] far_dist_factor compute near interactions when distance is less than far_dist_factor*R.
-     * The near panels makes an angle of min(acos(0.5+0.25*far_dist_factor), 2*asin(1/(2+far_dist_factor))).
+     * @param[in] close_threshold compute near interactions when distance is less than close_threshold*R.
+     * The near panels makes an angle of min(acos(0.5+0.25*close_threshold), 2*asin(1/(2+close_threshold))).
      */
-    void Init(const Vector<Real>& Xc_, const Real R_, bool adap = false, Real far_dist_factor = 1.0);
+    void Init(const Vector<Real>& Xc_, const Real R_, bool adap = false, Real close_threshold = 0.5);
 
     /**
      * Return the number of discs.

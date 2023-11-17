@@ -4,8 +4,8 @@ namespace sctl {
 
   template <class Real, Integer Order> DiscPanelLst<Real,Order>::~DiscPanelLst() {}
 
-  template <class Real, Integer Order> void DiscPanelLst<Real,Order>::Init(const Vector<Real>& Xc_, const Real R_, bool adap, Real far_dist_factor) {
-    SCTL_ASSERT(far_dist_factor < 2);
+  template <class Real, Integer Order> void DiscPanelLst<Real,Order>::Init(const Vector<Real>& Xc_, const Real R_, bool adap, Real close_threshold) {
+    SCTL_ASSERT(close_threshold < 2);
     Xc = Xc_;
     R = R_;
 
@@ -14,13 +14,12 @@ namespace sctl {
     for (auto& t : theta_break) t.ReInit(0);
 
     const Real pi = const_pi<Real>();
-    Real fac = 0.99;
-    Real close_threshold = 0.5;
-    Real dan = 2*asin<Real>(1/(2+close_threshold));
-    Real dhairya = acos<Real>(0.5+close_threshold/4);
-    Real close_angle = fac * std::min(dan, dhairya);
-    Real c = 0.5*close_angle;
-    Real max_size = 0.5*close_angle;
+    const Real fac = 0.99;
+    const Real dan = 2*asin<Real>(1/(2+close_threshold));
+    const Real dhairya = acos<Real>(0.5+close_threshold/4);
+    const Real close_angle = fac * std::min(dan, dhairya);
+    const Real c = 0.5*close_angle;
+    const Real max_size = 0.5*close_angle;
 
     Vector<Vector<Real>> breaks(Ndisc), endpoints(Ndisc);
     Vector<Vector<Long>> ireverse(Ndisc);
@@ -33,19 +32,19 @@ namespace sctl {
     for (Long j = 0; j < Ndisc; j++) {
       for (Long k = j+1; k < Ndisc; k++) {
 
-        Real dx = Xc[2*j]   - Xc[2*k];
-        Real dy = Xc[2*j+1] - Xc[2*k+1];
-        Real dist = sqrt<Real>(dx*dx + dy*dy) - 2*R;
+        const Real dx = Xc[2*j]   - Xc[2*k];
+        const Real dy = Xc[2*j+1] - Xc[2*k+1];
+        const Real dist = sqrt<Real>(dx*dx + dy*dy) - 2*R;
 
         if (dist < close_threshold*R) {
 
-          Real theta_k = atan2<Real>(dy, dx); // in [-pi, pi]
-          Real theta_j = (theta_k < 0 ? theta_k+pi : theta_k-pi); // in [-pi, pi]
+          const Real theta_k = atan2<Real>(dy, dx); // in [-pi, pi]
+          const Real theta_j = (theta_k < 0 ? theta_k+pi : theta_k-pi); // in [-pi, pi]
 
           // Add the endpoints of the near-region to the list of panel
           // breakpoints for each disc
-          Long start_idx_j = theta_break[j].Dim();
-          Long start_idx_k = theta_break[k].Dim();
+          const Long start_idx_j = theta_break[j].Dim();
+          const Long start_idx_k = theta_break[k].Dim();
           theta_break[j].PushBack(theta_j-c);
           theta_break[j].PushBack(theta_j+c);
           theta_break[k].PushBack(theta_k-c);
@@ -58,7 +57,7 @@ namespace sctl {
 
           // Refine the near-region until the panel size is less than
           // the square root of the distance between the discs
-          Long nlevels = adap ? (Long)(2+log2<Real>(close_threshold*R/dist)) : 2;
+          const Long nlevels = adap ? (Long)(2+0.5*log2<Real>(close_threshold*R/dist)) : 2;
           if (nlevels > 0) {
             theta_break[j].PushBack(theta_j);
             theta_break[k].PushBack(theta_k);
@@ -92,13 +91,13 @@ namespace sctl {
       // Now refine the leftover regions (if needed)
       std::sort(endpoints[j].begin(), endpoints[j].end());
       for (Long i = 1; i < endpoints[j].Dim(); i+=2) {
-        Real theta0 = endpoints[j][i];
-        Real theta1 = (i < endpoints[j].Dim()-1 ? endpoints[j][i+1] : endpoints[j][0]+2*pi);
+        const Real theta0 = endpoints[j][i];
+        const Real theta1 = (i < endpoints[j].Dim()-1 ? endpoints[j][i+1] : endpoints[j][0]+2*pi);
         Real dt = theta1-theta0;
-        Long nuniform = (Long)ceil<Real>(dt/max_size);
+        const Long nuniform = (Long)ceil<Real>(dt/max_size);
         dt /= nuniform;
         for (Long l = 1; l < nuniform; l++) {
-            theta_break[j].PushBack(theta0+l*dt);
+          theta_break[j].PushBack(theta0+l*dt);
         }
       }
 
