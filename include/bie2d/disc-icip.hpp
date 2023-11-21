@@ -82,7 +82,7 @@ namespace sctl {
      *
      * @param[in] tol accuracy tolerance.
      */
-    virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order> panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const = 0;
+    virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order>& panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const = 0;
 
     /**
      * Compute the compressed preconditioner matrix-block for interaction
@@ -114,7 +114,7 @@ namespace sctl {
      *
      * @param[in] M_lst list of small matrix-blocks.
      */
-    static void ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order> panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst);
+    static void ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order>& panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst);
 
     /**
      * Solve the boundary integral equation.
@@ -159,8 +159,6 @@ namespace sctl {
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
     mutable ParallelSolver<Real> solver; // GMRES solver
 
-    Vector<Long> near_dsp_orig, near_dsp, near_cnt;
-    Vector<Long> far_dsp_orig, far_dsp, far_cnt;
     PanelLst<Real,Order> panels_near, panels_far;
     Vector<Real> X, Xnear, Xfar;
   };

@@ -2,6 +2,7 @@
 #define BIE2D_DISC_CAPACITANCE_HPP
 
 #include <sctl.hpp>
+#include <bie2d/disc-biop.hpp>
 #include <bie2d/disc-icip.hpp>
 #include <bie2d/kernels.hpp>
 
@@ -103,7 +104,7 @@ namespace sctl {
      *
      * @param[in] tol accuracy tolerance.
      */
-    virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order> panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const;
+    virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order>& panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const;
 
     /**
      * Apply the Laplace capacitance operator directly on the current
@@ -115,10 +116,8 @@ namespace sctl {
      */
     virtual void ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& sigma) const;
 
-    Laplace2D_FxU LaplaceSL_Ker; // Laplace SL kernel
-    Laplace2D_DxU LaplaceDL_Ker; // Laplace DL kernel
-    BoundaryIntegralOp<Real,Laplace2D_FxU> LaplaceSL_BIOp_near, LaplaceSL_BIOp_far; // Laplace SL operator
-    BoundaryIntegralOp<Real,Laplace2D_DxU> LaplaceDL_BIOp_near, LaplaceDL_BIOp_far; // Laplace DL operator
+    DiscBIOp<Real,Order,Laplace2D_FxU> LaplaceSL_BIOp; // Laplace SL operator
+    DiscBIOp<Real,Order,Laplace2D_DxU> LaplaceDL_BIOp; // Laplace DL operator
     Matrix<Real> V0; // rigid velocity basis for each disc (dimensions = 3 x Nnodes*COORD_DIM)
   };
 

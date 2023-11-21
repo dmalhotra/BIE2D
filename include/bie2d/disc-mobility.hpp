@@ -2,6 +2,7 @@
 #define BIE2D_DISC_MOBILITY_HPP
 
 #include <sctl.hpp>
+#include <bie2d/disc-biop.hpp>
 #include <bie2d/disc-icip.hpp>
 #include <bie2d/kernels.hpp>
 
@@ -63,7 +64,7 @@ namespace sctl {
      *
      * @param[in] tol accuracy tolerance.
      */
-    virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order> panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const;
+    virtual void BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order>& panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const;
 
     /**
      * Apply the Stokes mobility operator directly on the current
@@ -80,11 +81,8 @@ namespace sctl {
      */
     static void RigidVelocityBasis(Matrix<Real>& V, const DiscPanelLst<Real,Order>& disc_panels, const Long disc_idx = -1);
 
-    Stokes2D_FxU StokesSL_Ker; // Stokes SL kernel
-    Stokes2D_DxU StokesDL_Ker; // Stokes DL kernel
-    BoundaryIntegralOp<Real,Stokes2D_FxU> StokesSL_BIOp; // Stokes SL operator
-    BoundaryIntegralOp<Real,Stokes2D_FxU> StokesSL_BIOp_near, StokesSL_BIOp_far; // Stokes SL operator
-    BoundaryIntegralOp<Real,Stokes2D_DxU> StokesDL_BIOp_near, StokesDL_BIOp_far; // Stokes DL operator
+    DiscBIOp<Real,Order,Stokes2D_FxU> StokesSL_BIOp; // Stokes SL operator
+    DiscBIOp<Real,Order,Stokes2D_DxU> StokesDL_BIOp; // Stokes DL operator
     Matrix<Real> V0; // rigid velocity basis for each disc (dimensions = 3 x Nnodes*COORD_DIM)
   };
 

@@ -169,6 +169,50 @@ namespace sctl {
         offset += panel_count;
       }
     }
+
+    { // setup split into near and far panels
+      const auto& near_lst = GetNearList();
+      const Long N = near_lst.Dim()*2;
+
+      Vector<Long> panel_range(N*2+2);
+      panel_range[0] = 0;
+      panel_range.end()[-1] = this->Size();
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < near_lst.Dim(); i++) {
+        const auto& n = near_lst[i];
+        const Long panel_idx0 = PanelIdxOffset(n.disc_idx0);
+        const Long panel_idx1 = PanelIdxOffset(n.disc_idx1);
+        panel_range[1+i*4+0] = panel_idx0 + n.panel_idx_range0[0];
+        panel_range[1+i*4+1] = panel_idx0 + n.panel_idx_range0[1];
+        panel_range[1+i*4+2] = panel_idx1 + n.panel_idx_range1[0];
+        panel_range[1+i*4+3] = panel_idx1 + n.panel_idx_range1[1];
+      }
+      omp_par::merge_sort(panel_range.begin()+1, panel_range.end()-1);
+
+      far_dsp_orig.ReInit(N+1);
+      far_dsp.ReInit(N+1);
+      far_cnt.ReInit(N+1);
+      far_dsp[0] = 0;
+
+      near_dsp_orig.ReInit(N);
+      near_dsp.ReInit(N);
+      near_cnt.ReInit(N);
+      near_dsp[0] = 0;
+
+      for (Long i = 0; i < N; i++) {
+        const Long n0 = panel_range[i*2+0];
+        const Long n1 = panel_range[i*2+1];
+        const Long n2 = panel_range[i*2+2];
+        far_dsp_orig[i] = n0;
+        far_cnt[i] = n1-n0;
+        near_dsp_orig[i] = n1;
+        near_cnt[i] = n2-n1;
+      }
+      far_dsp_orig[N] = panel_range[N*2+0];
+      far_cnt[N] = panel_range[N*2+1] - panel_range[N*2+0];
+      omp_par::scan(far_cnt.begin(), far_dsp.begin(), N+1);
+      omp_par::scan(near_cnt.begin(), near_dsp.begin(), N);
+    }
   }
 
   template <class Real, Integer Order> Long DiscPanelLst<Real,Order>::DiscCount() const {
@@ -206,6 +250,94 @@ namespace sctl {
 
   template <class Real, Integer Order> Long DiscPanelLst<Real,Order>::PanelIdxOffset(const Long disc_idx) const {
     return panel_dsp[disc_idx];
+  }
+
+  template <class Real, Integer Order> void DiscPanelLst<Real,Order>::Split(Vector<Real>* v_near, Vector<Real>* v_far, const Vector<Real>& v) const {
+    if ((v_near == nullptr && v_far == nullptr) || !far_cnt.Dim()) return;
+    const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
+    const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
+    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
+    const Long dof = v.Dim() / N;
+    SCTL_ASSERT(v.Dim() == N*dof);
+
+    if (v_near) {
+      if (v_near->Dim() != Nnear*dof) v_near->ReInit(Nnear*dof);
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < near_cnt.Dim(); i++) {
+        const Long offset_orig = near_dsp_orig[i];
+        const Long offset = near_dsp[i];
+        for (Long j = 0; j < near_cnt[i]; j++) {
+          for (Long k = 0; k < dof; k++) {
+            (*v_near)[(offset+j)*dof+k] = v[(offset_orig+j)*dof+k];
+          }
+        }
+      }
+    }
+    if (v_far) {
+      if (v_far->Dim() != Nfar*dof) v_far->ReInit(Nfar*dof);
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < far_cnt.Dim(); i++) {
+        const Long offset_orig = far_dsp_orig[i];
+        const Long offset = far_dsp[i];
+        for (Long j = 0; j < far_cnt[i]; j++) {
+          for (Long k = 0; k < dof; k++) {
+            (*v_far)[(offset+j)*dof+k] = v[(offset_orig+j)*dof+k];
+          }
+        }
+      }
+    }
+  }
+
+  template <class Real, Integer Order> void DiscPanelLst<Real,Order>::Merge(Vector<Real>* v, const Vector<Real>& v_near, const Vector<Real>& v_far) const {
+    if (v == nullptr || !far_cnt.Dim()) return;
+    const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
+    const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
+    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
+    const Long dof = (v_near.Dim() ? v_near.Dim()/Nnear : v_far.Dim()/Nfar);
+    if (v_near.Dim()) SCTL_ASSERT(v_near.Dim() == Nnear*dof);
+    if ( v_far.Dim()) SCTL_ASSERT( v_far.Dim() ==  Nfar*dof);
+
+    if (v->Dim() != N*dof) v->ReInit(N*dof);
+    if (v_near.Dim()) {
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < near_cnt.Dim(); i++) {
+        const Long offset_orig = near_dsp_orig[i];
+        const Long offset = near_dsp[i];
+        for (Long j = 0; j < near_cnt[i]; j++) {
+          for (Long k = 0; k < dof; k++) {
+            (*v)[(offset_orig+j)*dof+k] = v_near[(offset+j)*dof+k];
+          }
+        }
+      }
+    } else {
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < near_cnt.Dim(); i++) {
+        const Long offset_orig = near_dsp_orig[i]*dof;
+        for (Long j = 0; j < near_cnt[i]*dof; j++) {
+          (*v)[offset_orig+j] = 0;
+        }
+      }
+    }
+    if (v_far .Dim()) {
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < far_cnt.Dim(); i++) {
+        const Long offset_orig = far_dsp_orig[i];
+        const Long offset = far_dsp[i];
+        for (Long j = 0; j < far_cnt[i]; j++) {
+          for (Long k = 0; k < dof; k++) {
+            (*v)[(offset_orig+j)*dof+k] = v_far[(offset+j)*dof+k];
+          }
+        }
+      }
+    } else {
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < far_cnt.Dim(); i++) {
+        const Long offset_orig = far_dsp_orig[i]*dof;
+        for (Long j = 0; j < far_cnt[i]*dof; j++) {
+          (*v)[offset_orig+j] = 0;
+        }
+      }
+    }
   }
 
 }

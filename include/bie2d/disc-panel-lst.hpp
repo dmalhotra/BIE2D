@@ -86,6 +86,10 @@ namespace sctl {
      */
     Long PanelIdxOffset(const Long disc_idx) const;
 
+    void Split(Vector<Real>* v_near, Vector<Real>* v_far, const Vector<Real>& v) const;
+
+    void Merge(Vector<Real>* v, const Vector<Real>& v_near, const Vector<Real>& v_far) const;
+
     private:
 
     Comm comm;
@@ -97,6 +101,8 @@ namespace sctl {
     Vector<Long> panel_cnt, panel_dsp;
 
     Vector<NearData> near_lst;
+    Vector<Long> near_dsp_orig, near_dsp, near_cnt;
+    Vector<Long> far_dsp_orig, far_dsp, far_cnt;
   };
 
 }

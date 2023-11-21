@@ -1,27 +1,14 @@
 namespace sctl {
 
-  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(StokesSL_Ker, false, this->comm), StokesSL_BIOp_near(StokesSL_Ker, false, this->comm), StokesSL_BIOp_far(StokesSL_Ker, false, this->comm), StokesDL_BIOp_near(StokesDL_Ker, false, this->comm), StokesDL_BIOp_far(StokesDL_Ker, false, this->comm) {}
+  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(this->comm), StokesDL_BIOp(this->comm) {}
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
     RigidVelocityBasis(V0, this->disc_panels);
 
-    StokesSL_BIOp     .AddElemList(this->disc_panels);
-    StokesSL_BIOp_near.AddElemList(this->panels_near);
-    StokesSL_BIOp_far .AddElemList(this->panels_far );
-    StokesDL_BIOp_near.AddElemList(this->panels_near);
-    StokesDL_BIOp_far .AddElemList(this->panels_far );
-
-    StokesSL_BIOp     .SetAccuracy(tol);
-    StokesSL_BIOp_near.SetAccuracy(tol);
-    StokesSL_BIOp_far .SetAccuracy(tol);
-    StokesDL_BIOp_near.SetAccuracy(tol);
-    StokesDL_BIOp_far .SetAccuracy(tol);
-
-    StokesSL_BIOp_near.SetTargetCoord(this->Xfar);
-    StokesSL_BIOp_far .SetTargetCoord(this->X   );
-    StokesDL_BIOp_near.SetTargetCoord(this->Xfar);
-    StokesDL_BIOp_far .SetTargetCoord(this->X   );
+    const bool exclude_near = (icip_type == ICIPType::Compress || icip_type == ICIPType::Precond);
+    StokesDL_BIOp.Init(this->disc_panels, exclude_near, tol);
+    StokesSL_BIOp.Init(this->disc_panels, false, tol);
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter) {
@@ -77,7 +64,7 @@ namespace sctl {
     return name;
   }
 
-  template <class Real, Integer Order> void DiscMobility<Real,Order>::BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order> panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const {
+  template <class Real, Integer Order> void DiscMobility<Real,Order>::BuildInteracBlock(Matrix<Real>& M, const DiscPanelLst<Real,Order>& panel_lst, const typename DiscPanelLst<Real,Order>::NearData& interac_block, const Real tol) const {
     const Long disc_idx0 = interac_block.disc_idx0;
     const Long disc_idx1 = interac_block.disc_idx1;
     const Long disc_panel_start0 = interac_block.panel_idx_range0[0];
@@ -151,13 +138,7 @@ namespace sctl {
     this->Merge(&sigma_far_, Vector<Real>(), sigma_far);
 
     Vector<Real> Udl;
-    StokesDL_BIOp_far .ComputePotential(Udl, sigma_far );
-    if (sigma_near_.Dim()) {
-      Vector<Real> Udl_near, Udl_near_;
-      StokesDL_BIOp_near.ComputePotential(Udl_near, sigma_near);
-      this->Merge(&Udl_near_, Vector<Real>(), Udl_near);
-      Udl += Udl_near_;
-    }
+    StokesDL_BIOp.ComputePotential(Udl, sigma);
     (*U) = 0.5*sigma_far_ + Udl;
 
     Long offset = 0;

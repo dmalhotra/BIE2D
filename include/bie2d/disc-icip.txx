@@ -12,48 +12,6 @@ namespace sctl {
     tol_ = tol;
 
     { // setup split into near and far panels
-      const auto& near_lst = disc_panels.GetNearList();
-      const Long N = near_lst.Dim()*2;
-
-      Vector<Long> panel_range(N*2+2);
-      panel_range[0] = 0;
-      panel_range.end()[-1] = disc_panels.Size();
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < near_lst.Dim(); i++) {
-        const auto& n = near_lst[i];
-        const Long panel_idx0 = disc_panels.PanelIdxOffset(n.disc_idx0);
-        const Long panel_idx1 = disc_panels.PanelIdxOffset(n.disc_idx1);
-        panel_range[1+i*4+0] = panel_idx0 + n.panel_idx_range0[0];
-        panel_range[1+i*4+1] = panel_idx0 + n.panel_idx_range0[1];
-        panel_range[1+i*4+2] = panel_idx1 + n.panel_idx_range1[0];
-        panel_range[1+i*4+3] = panel_idx1 + n.panel_idx_range1[1];
-      }
-      omp_par::merge_sort(panel_range.begin()+1, panel_range.end()-1);
-
-      far_dsp_orig.ReInit(N+1);
-      far_dsp.ReInit(N+1);
-      far_cnt.ReInit(N+1);
-      far_dsp[0] = 0;
-
-      near_dsp_orig.ReInit(N);
-      near_dsp.ReInit(N);
-      near_cnt.ReInit(N);
-      near_dsp[0] = 0;
-
-      for (Long i = 0; i < N; i++) {
-        const Long n0 = panel_range[i*2+0];
-        const Long n1 = panel_range[i*2+1];
-        const Long n2 = panel_range[i*2+2];
-        far_dsp_orig[i] = n0;
-        far_cnt[i] = n1-n0;
-        near_dsp_orig[i] = n1;
-        near_cnt[i] = n2-n1;
-      }
-      far_dsp_orig[N] = panel_range[N*2+0];
-      far_cnt[N] = panel_range[N*2+1] - panel_range[N*2+0];
-      omp_par::scan(far_cnt.begin(), far_dsp.begin(), N+1);
-      omp_par::scan(near_cnt.begin(), near_dsp.begin(), N);
-
       X = disc_panels.SurfCoord(-1);
       Split(&Xnear, &Xfar, X);
       panels_near.Init(Xnear);
@@ -269,7 +227,7 @@ namespace sctl {
     }
   }
 
-  template <class Real, Integer Order> void ICIP<Real,Order>::ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order> panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst) {
+  template <class Real, Integer Order> void ICIP<Real,Order>::ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order>& panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst) {
     SCTL_ASSERT(block_lst.Dim() == M_lst.Dim());
     if (block_lst.Dim() == 0) return;
 
@@ -369,12 +327,12 @@ namespace sctl {
           BIOp(&U, x);
           //std::cout<<i<<' '<<N<<'\n';
         }
-        //std::string fname = std::string("M_mobil_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ?
+        //std::string fname = std::string("M_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ? "compress" : "precond") + ".mat";
         //if (std::is_same<Real,QuadReal>::value) M.Write(fname.c_str());
       }
 
       Matrix<Real> MM = Matrix<Real>(M).pinv(machine_eps<Real>());
-      //std::string fname = std::string("Minv_mobil_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ?
+      //std::string fname = std::string("Minv_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ? "compress" : "precond") + ".mat";
       //if (std::is_same<Real,QuadReal>::value) MM.Write(fname.c_str());
 
       const Matrix<Real> rhs__(1, rhs_.Dim(), rhs_.begin());
@@ -392,40 +350,8 @@ namespace sctl {
     if (icip_type_ == ICIPType::Adaptive) {
       if (v_near && v_near->Dim()) v_near->ReInit(0);
       if (v_far) (*v_far) = v;
-      return;
-    }
-    if ((v_near == nullptr && v_far == nullptr) || !far_cnt.Dim()) return;
-    const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
-    const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
-    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
-    const Long dof = v.Dim() / N;
-    SCTL_ASSERT(v.Dim() == N*dof);
-
-    if (v_near) {
-      if (v_near->Dim() != Nnear*dof) v_near->ReInit(Nnear*dof);
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < near_cnt.Dim(); i++) {
-        const Long offset_orig = near_dsp_orig[i];
-        const Long offset = near_dsp[i];
-        for (Long j = 0; j < near_cnt[i]; j++) {
-          for (Long k = 0; k < dof; k++) {
-            (*v_near)[(offset+j)*dof+k] = v[(offset_orig+j)*dof+k];
-          }
-        }
-      }
-    }
-    if (v_far) {
-      if (v_far->Dim() != Nfar*dof) v_far->ReInit(Nfar*dof);
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < far_cnt.Dim(); i++) {
-        const Long offset_orig = far_dsp_orig[i];
-        const Long offset = far_dsp[i];
-        for (Long j = 0; j < far_cnt[i]; j++) {
-          for (Long k = 0; k < dof; k++) {
-            (*v_far)[(offset+j)*dof+k] = v[(offset_orig+j)*dof+k];
-          }
-        }
-      }
+    } else {
+      disc_panels.Split(v_near, v_far, v);
     }
   }
 
@@ -433,56 +359,8 @@ namespace sctl {
     if (icip_type_ == ICIPType::Adaptive) {
       SCTL_ASSERT(!v_near.Dim());
       if (v) (*v) = v_far;
-      return;
-    }
-    if (v == nullptr || !far_cnt.Dim()) return;
-    const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
-    const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
-    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
-    const Long dof = (v_near.Dim() ? v_near.Dim()/Nnear : v_far.Dim()/Nfar);
-    if (v_near.Dim()) SCTL_ASSERT(v_near.Dim() == Nnear*dof);
-    if ( v_far.Dim()) SCTL_ASSERT( v_far.Dim() ==  Nfar*dof);
-
-    if (v->Dim() != N*dof) v->ReInit(N*dof);
-    if (v_near.Dim()) {
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < near_cnt.Dim(); i++) {
-        const Long offset_orig = near_dsp_orig[i];
-        const Long offset = near_dsp[i];
-        for (Long j = 0; j < near_cnt[i]; j++) {
-          for (Long k = 0; k < dof; k++) {
-            (*v)[(offset_orig+j)*dof+k] = v_near[(offset+j)*dof+k];
-          }
-        }
-      }
     } else {
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < near_cnt.Dim(); i++) {
-        const Long offset_orig = near_dsp_orig[i]*dof;
-        for (Long j = 0; j < near_cnt[i]*dof; j++) {
-          (*v)[offset_orig+j] = 0;
-        }
-      }
-    }
-    if (v_far .Dim()) {
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < far_cnt.Dim(); i++) {
-        const Long offset_orig = far_dsp_orig[i];
-        const Long offset = far_dsp[i];
-        for (Long j = 0; j < far_cnt[i]; j++) {
-          for (Long k = 0; k < dof; k++) {
-            (*v)[(offset_orig+j)*dof+k] = v_far[(offset+j)*dof+k];
-          }
-        }
-      }
-    } else {
-      #pragma omp parallel for schedule(static)
-      for (Long i = 0; i < far_cnt.Dim(); i++) {
-        const Long offset_orig = far_dsp_orig[i]*dof;
-        for (Long j = 0; j < far_cnt[i]*dof; j++) {
-          (*v)[offset_orig+j] = 0;
-        }
-      }
+      disc_panels.Merge(v, v_near, v_far);
     }
   }
 
