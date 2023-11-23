@@ -150,6 +150,8 @@ namespace sctl {
 
     void Merge(Vector<Real>* v, const Vector<Real>& v_near, const Vector<Real>& v_far) const;
 
+    void disc_wise_outer_product(Vector<Real>& U, const Vector<Real>& sigma_far, const Vector<Real>& sigma_near, const Matrix<Real>& V0, const Matrix<Real>& V1) const;
+
     Comm comm;
     Real tol_;
     ICIPType icip_type_;

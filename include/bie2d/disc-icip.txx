@@ -384,4 +384,56 @@ namespace sctl {
     }
   }
 
+  template <class Real, Integer Order> void ICIP<Real,Order>::disc_wise_outer_product(Vector<Real>& U, const Vector<Real>& sigma_far, const Vector<Real>& sigma_near, const Matrix<Real>& V0, const Matrix<Real>& V1) const {
+    const auto add_interac = [this,&V0,&V1](Vector<Real>& U, const Vector<Real>& sigma, const Long disc_idx, const Long near_range0, const Long near_range1) {
+      const Long Npanels = disc_panels.Size();
+      const Long dof0 = V0.Dim(1) / Npanels;
+      const Long dof1 = V1.Dim(1) / Npanels;
+      const Long k0 = V0.Dim(0);
+      SCTL_ASSERT(sigma.Dim() == Npanels * dof0);
+      SCTL_ASSERT(V0.Dim(1) == Npanels * dof0);
+      SCTL_ASSERT(V1.Dim(1) == Npanels * dof1);
+      SCTL_ASSERT(V1.Dim(0) == k0);
+      if (U.Dim() != Npanels * dof1) {
+        U.ReInit(Npanels * dof1);
+        U.SetZero();
+      }
+
+      Long range[2];
+      const Long offset = disc_panels.PanelIdxOffset(disc_idx);
+      const Long N = disc_panels.SurfWts(disc_idx).Dim() / Order;
+      if (near_range1 > near_range0) {
+        range[0] = offset + near_range0;
+        range[1] = offset + near_range1;
+      } else {
+        range[0] = offset + 0;
+        range[1] = offset + N;
+      }
+
+      for (Long k = 0; k < k0; k++) {
+        Real sum = 0;
+        for (Long j = range[0]*dof0; j < range[1]*dof0; j++) sum += V0[k][j] * sigma[j];
+
+        if (near_range1 > near_range0) {
+          for (Long j =   offset*dof1; j <   range[0]*dof1; j++) U[j] += sum * V1[k][j];
+          for (Long j = range[1]*dof1; j < (offset+N)*dof1; j++) U[j] += sum * V1[k][j];
+        } else {
+          for (Long j =   offset*dof1; j < (offset+N)*dof1; j++) U[j] += sum * V1[k][j];
+        }
+      }
+    };
+
+    for (Long disc_idx = 0; disc_idx < disc_panels.DiscCount(); disc_idx++) {
+      add_interac(U, sigma_far, disc_idx, 0, 0);
+    }
+
+    if (sigma_near.Dim()) {
+      const auto& near_lst = disc_panels.GetNearList();
+      for (const auto& near_block : near_lst) {
+        add_interac(U, sigma_near, near_block.disc_idx0, near_block.panel_idx_range0[0], near_block.panel_idx_range0[1]);
+        add_interac(U, sigma_near, near_block.disc_idx1, near_block.panel_idx_range1[0], near_block.panel_idx_range1[1]);
+      }
+    }
+  }
+
 }

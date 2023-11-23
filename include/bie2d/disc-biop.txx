@@ -158,7 +158,7 @@ namespace sctl {
           for (Long j = 0; j < Order; j++) {
             const Real w = W[i*Order+j];
             for (Long k = 0; k < KDIM0; k++) {
-              F_[(i*Order+j)*KDIM0+k] *= w;
+              F_[(i*Order+j)*KDIM0+k] = F[(i*Order+j)*KDIM0+k] * w;
             }
           }
         }
@@ -180,8 +180,8 @@ namespace sctl {
 
           U0.SetZero();
           U1.SetZero();
-          Kernel::template Eval<Real,true>(U0, Xnear, Xs0, Xn0, F0_, -1, Ptr2ConstItr<char>(&ker,1));
-          Kernel::template Eval<Real,true>(U1, Xnear, Xs1, Xn1, F1_, -1, Ptr2ConstItr<char>(&ker,1));
+          Kernel::template Eval<Real,true>(U0, Xnear, Xs0, Xn0, F0_, -1, Ptr2ConstItr<char>(&ker,sizeof(ker)));
+          Kernel::template Eval<Real,true>(U1, Xnear, Xs1, Xn1, F1_, -1, Ptr2ConstItr<char>(&ker,sizeof(ker)));
           U0 += U1;
 
           Merge(&U_, U0, Vector<Real>());

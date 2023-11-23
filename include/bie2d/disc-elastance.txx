@@ -120,29 +120,8 @@ namespace sctl {
     LaplaceDL_BIOp.ComputePotential(Udl, sigma);
     (*U) = 0.5*sigma_far_ + Udl;
 
-    Long offset = 0;
-    Vector<Real> VVt_near(U->Dim());
-    Vector<Real> VVt_far (U->Dim());
-    for (Long k = 0; k < this->disc_panels.DiscCount(); k++) {
-      const auto& wts = this->disc_panels.SurfWts(k);
-      const Long N = wts.Dim();
-
-      Real Qn = 0, Qf = 0;
-      if (sigma_near_.Dim()) {
-        for (Long i = 0; i < N; i++) Qn += wts[i] * sigma_near_[offset+i];
-      }
-      for (Long i = 0; i < N; i++) Qf += wts[i] * sigma_far_ [offset+i];
-
-      for (Long i = 0; i < N; i++) VVt_near[offset+i] = Qn;
-      for (Long i = 0; i < N; i++) VVt_far [offset+i] = Qf;
-      offset += N;
-    }
-    { // Set near-near block of VVt_near to zero
-      Vector<Real> Vtmp;
-      this->Split(nullptr, &Vtmp, VVt_near);
-      this->Merge(&VVt_near, Vector<Real>(), Vtmp);
-    }
-    (*U) += VVt_near + VVt_far;
+    Matrix<Real> one(1,sigma.Dim()); one = 1;
+    this->disc_wise_outer_product(*U, sigma_far_*this->disc_panels.SurfWts(-1), (sigma_near_.Dim() ? sigma_near_*this->disc_panels.SurfWts(-1) : Vector<Real>()), one, one);
   }
 
 }

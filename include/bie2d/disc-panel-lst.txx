@@ -35,6 +35,7 @@ namespace sctl {
         const Real dx = Xc[2*j]   - Xc[2*k];
         const Real dy = Xc[2*j+1] - Xc[2*k+1];
         const Real dist = sqrt<Real>(dx*dx + dy*dy) - 2*R;
+        SCTL_ASSERT(dist > 0);
 
         if (dist < close_threshold*R) {
 

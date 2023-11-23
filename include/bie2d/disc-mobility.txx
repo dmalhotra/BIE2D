@@ -141,49 +141,20 @@ namespace sctl {
     StokesDL_BIOp.ComputePotential(Udl, sigma);
     (*U) = 0.5*sigma_far_ + Udl;
 
-    Long offset = 0;
-    Vector<Real> VVt_near(U->Dim());
-    Vector<Real> VVt_far (U->Dim());
-    for (Long k = 0; k < this->disc_panels.DiscCount(); k++) {
-      const Real inv_circumf = 1/(2*const_pi<Real>()*this->disc_panels.DiscRadius());
-      const auto& wts = this->disc_panels.SurfWts(k);
-      const Long N = wts.Dim();
-
-      Vector<Real> In(3); In = 0;
-      Vector<Real> If(3); If = 0;
-      if (sigma_near_.Dim()) {
-        for (Long i = 0; i < N; i++) {
-          for (Long j = 0; j < 3; j++) {
-            In[j] += wts[i] * sigma_near_[offset+i*COORD_DIM+0] * V0[j][offset+i*COORD_DIM+0];
-            In[j] += wts[i] * sigma_near_[offset+i*COORD_DIM+1] * V0[j][offset+i*COORD_DIM+1];
-          }
-        }
-      }
+    const auto apply_wts = [](Vector<Real>& sigma, const Vector<Real>& wt, const Real scal) {
+      const Long N = wt.Dim();
+      const Long dof = sigma.Dim() / N;
+      SCTL_ASSERT(sigma.Dim() == N * dof);
       for (Long i = 0; i < N; i++) {
-        for (Long j = 0; j < 3; j++) {
-          If[j] += wts[i] * sigma_far_[offset+i*COORD_DIM+0] * V0[j][offset+i*COORD_DIM+0];
-          If[j] += wts[i] * sigma_far_[offset+i*COORD_DIM+1] * V0[j][offset+i*COORD_DIM+1];
+        for (Long k = 0; k < dof; k++) {
+          sigma[i*dof+k] *= wt[i] * scal;
         }
       }
-      In *= inv_circumf;
-      If *= inv_circumf;
-
-      for (Long i = 0; i < N*COORD_DIM; i++) {
-        VVt_near[offset+i] = 0;
-        VVt_far [offset+i] = 0;
-        for (Long j = 0; j < 3; j++) {
-          VVt_near[offset+i] += V0[j][offset+i] * In[j];
-          VVt_far [offset+i] += V0[j][offset+i] * If[j];
-        }
-      }
-      offset += N*COORD_DIM;
-    }
-    { // Set near-near block of VVt_near to zero
-      Vector<Real> Vtmp;
-      this->Split(nullptr, &Vtmp, VVt_near);
-      this->Merge(&VVt_near, Vector<Real>(), Vtmp);
-    }
-    (*U) += VVt_near + VVt_far;
+    };
+    const Real inv_circumf = 1/(2*const_pi<Real>()*this->disc_panels.DiscRadius());
+    apply_wts(sigma_far_, this->disc_panels.SurfWts(-1), inv_circumf);
+    apply_wts(sigma_near_, this->disc_panels.SurfWts(-1), inv_circumf);
+    this->disc_wise_outer_product(*U, sigma_far_, sigma_near_, V0, V0);
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::RigidVelocityBasis(Matrix<Real>& V, const DiscPanelLst<Real,Order>& disc_panels, const Long disc_idx) {
