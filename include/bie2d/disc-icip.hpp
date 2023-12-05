@@ -16,7 +16,7 @@ namespace sctl {
    * Base clas for ICIP.
    */
   template <class Real, Integer Order> class ICIP {
-    static constexpr Integer InterpOrder = 64;
+    static constexpr Integer InterpOrder = 512;
     static constexpr Integer COORD_DIM = 2;
     static constexpr Real d_max = 1.0; // largest distance between the discs is d_max*R
     static constexpr Real d_min = 1e-14; // smallest distance between the discs is d_min*R
@@ -58,6 +58,8 @@ namespace sctl {
     virtual const std::string& Name() const = 0;
 
     protected:
+
+    static const Vector<Real>& LogInterpNodes();
 
     /**
      * Apply the boundary integral operator directly on the current
@@ -160,6 +162,7 @@ namespace sctl {
     mutable Vector<Matrix<Real>> Kcorrec; // blocks to add to Kc
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
     mutable ParallelSolver<Real> solver; // GMRES solver
+    mutable StaticArray<Matrix<Real>,InterpOrder> precomp_R, precomp_Rinv;
 
     PanelLst<Real,Order> panels_near, panels_far;
     Vector<Real> X, Xnear, Xfar;

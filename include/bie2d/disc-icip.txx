@@ -4,8 +4,8 @@ namespace sctl {
 
   template <class Real, Integer Order> ICIP<Real,Order>::~ICIP() {}
 
-  template <class Real, Integer Order> void ICIP<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
-    disc_panels.Init(Xc, R, (icip_type==ICIPType::Adaptive), d_max);
+  template <class Real, Integer Order> void ICIP<Real,Order>::Init(const Vector<Real>& Xc, const Real radius, const Real tol, const ICIPType icip_type) {
+    disc_panels.Init(Xc, radius, (icip_type==ICIPType::Adaptive), d_max);
     icip_type_ = icip_type;
     Kcorrec.ReInit(0);
     Rprecon.ReInit(0);
@@ -29,6 +29,45 @@ namespace sctl {
         rsqrt_wts[i] = 1/sqrt_w;
       }
     }
+
+    for (Long i = comm.Rank(); i < InterpOrder; i+=comm.Size()) { // Read R, Rinv from file or compute if file doesn't exist
+      const auto fname = [this](const Long idx, const std::string& suffix) {
+        std::string fname_ = "precomp/" + Name();
+        fname_ += "-dmax" + std::to_string((Integer)round<Real>(log<Real>(d_max)/log<Real>(0.1)));
+        fname_ += "-dmin" + std::to_string((Integer)round<Real>(log<Real>(d_min)/log<Real>(0.1)));
+        fname_ += "-p" + std::to_string(InterpOrder);
+        fname_ += "-idx" + std::to_string(idx) + suffix;
+        return fname_;
+      };
+
+      // Read from file
+      precomp_R[i].ReInit(0,0);
+      precomp_Rinv[i].ReInit(0,0);
+      precomp_R[i].template Read<QuadReal>(fname(i,"-R.mat").c_str());
+      precomp_Rinv[i].template Read<QuadReal>(fname(i,"-Rinv.mat").c_str());
+
+      if (precomp_R[i].Dim(0)*precomp_R[i].Dim(1) == 0 || precomp_Rinv[i].Dim(0)*precomp_Rinv[i].Dim(1) == 0) { // Compute and write to file
+        const Real x = exp<Real>(LogInterpNodes()[i])/2*radius + radius;
+        BuildCompression(&precomp_R[i], &precomp_Rinv[i], -x, 0, x, 0, radius, machine_eps<Real>());
+        if (std::is_same<Real,QuadReal>::value) { // Write to file
+          precomp_R[i].template Write<QuadReal>(fname(i,"-R.mat").c_str());
+          precomp_Rinv[i].template Write<QuadReal>(fname(i,"-Rinv.mat").c_str());
+        }
+      }
+    }
+    for (Long i = 0; i < InterpOrder; i++) { // Gather all R, Rinv
+      const Long sender = i % comm.Size();
+      StaticArray<Long,4> mat_size{precomp_R[i].Dim(0), precomp_R[i].Dim(1), precomp_Rinv[i].Dim(0), precomp_Rinv[i].Dim(1)};
+      comm.Bcast(mat_size+0, 4, sender);
+
+      if (comm.Rank() != sender) {
+        precomp_R[i].ReInit(mat_size[0], mat_size[1]);
+        precomp_Rinv[i].ReInit(mat_size[2], mat_size[3]);
+      }
+      comm.Bcast(precomp_R[i].begin(), mat_size[0]*mat_size[1], sender);
+      comm.Bcast(precomp_Rinv[i].begin(), mat_size[2]*mat_size[3], sender);
+    }
+    SCTL_ASSERT_MSG(comm.Size()==1, "MPI not supported.");
   }
 
   template <class Real, Integer Order> const DiscPanelLst<Real,Order>& ICIP<Real,Order>::GetPanelList() const {
@@ -192,19 +231,49 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> void ICIP<Real,Order>::GetPrecondBlock(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius) const {
-    Real tol = machine_eps<Real>();
-    BuildCompression(R, Rinv, x0, y0, x1, y1, radius, tol); // compute compression on-the-fly
+    const Real d = sqrt<Real>((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0))/radius - 2;
+    const Long dof = precomp_R[0].Dim(0) / (8*Order);
+    SCTL_ASSERT(precomp_R[0].Dim(0) == 8*Order*dof);
 
-    // @Mariana TODO: get R and Rinv from interpolation instead of computing on-the-fly.
-    //
-    //const auto& leg_nds = LegQuadRule<Real>::ComputeNds(InterpOrder);
-    //for (Long i = 0; i < InterpOrder; i++) { // loop over interpolation nodes
-    //  const Real x = R + R/2 * d_min * exp(log(d_max/d_min) * leg_nds[i]);
-    //
-    //  Matrix<Real> R_i;
-    //  // load R_i from file, or compute it if file doesn't exist
-    //  // BuildCompression(R, Rinv, -x, 0, x, 0, radius, tol);
-    //}
+    const auto apply_rotation = [&x0,&y0,&x1,&y1](Matrix<Real>& M) {
+      const Real x = x1-x0;
+      const Real y = y1-y0;
+      const Real rinv = 1/sqrt<Real>(x*x + y*y);
+
+      Tensor<Real,true,2,2> R0, R1;
+      R0(0,0) = x*rinv; R0(0,1) =-y*rinv;
+      R0(1,0) = y*rinv; R0(1,1) = x*rinv;
+      R1(0,0) = x*rinv; R1(0,1) = y*rinv;
+      R1(1,0) =-y*rinv; R1(1,1) = x*rinv;
+
+      for (Long i = 0; i < M.Dim(0); i+=2) { // M <-- R0 * M
+        for (Long j = 0; j < M.Dim(1); j++) {
+          const Real x[2] = {M[i+0][j], M[i+1][j]};
+          M[i+0][j] = R0(0,0) * x[0] + R0(0,1) * x[1];
+          M[i+1][j] = R0(1,0) * x[0] + R0(1,1) * x[1];
+        }
+      }
+      for (Long i = 0; i < M.Dim(0); i++) { // M <-- M * R1
+        for (Long j = 0; j < M.Dim(1); j+=2) {
+          const Real x[2] = {M[i][j+0], M[i][j+1]};
+          M[i][j+0] = R1(0,0) * x[0] + R1(1,0) * x[1];
+          M[i][j+1] = R1(0,1) * x[0] + R1(1,1) * x[1];
+        }
+      }
+    };
+
+    Vector<Real> interp_wts;
+    LagrangeInterp<Real>::Interpolate(interp_wts, LogInterpNodes(), Vector<Real>{log<Real>(d)});
+    if (R) {
+      (*R) = interp_wts[0] * precomp_R[0];
+      for (Long i = 1; i < InterpOrder; i++) (*R) += interp_wts[i] * precomp_R[i];
+      if (dof == COORD_DIM) apply_rotation(*R);
+    }
+    if (Rinv) {
+      (*Rinv) = interp_wts[0] * precomp_Rinv[0];
+      for (Long i = 1; i < InterpOrder; i++) (*Rinv) += interp_wts[i] * precomp_Rinv[i];
+      if (dof == COORD_DIM) apply_rotation(*Rinv);
+    }
   }
 
   template <class Real, Integer Order> void ICIP<Real,Order>::Setup() const {
@@ -303,6 +372,11 @@ namespace sctl {
     } else {
       (*U) = sigma; // identity
     }
+  }
+
+  template <class Real, Integer Order> const Vector<Real>& ICIP<Real,Order>::LogInterpNodes() {
+    static const Vector<Real> interp_nds = log<Real>(d_max) + log<Real>(d_min/d_max) * LegQuadRule<Real>::ComputeNds(InterpOrder);
+    return interp_nds;
   }
 
   template <class Real, Integer Order> void ICIP<Real,Order>::SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) const {
