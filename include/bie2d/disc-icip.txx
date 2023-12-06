@@ -1,6 +1,6 @@
 namespace sctl {
 
-  template <class Real, Integer Order> ICIP<Real,Order>::ICIP(const Comm& comm_) : comm(comm_), solver(comm, true) {}
+  template <class Real, Integer Order> ICIP<Real,Order>::ICIP(const Comm& comm_) : comm(comm_), solver(comm, true), precomp_radius(0) {}
 
   template <class Real, Integer Order> ICIP<Real,Order>::~ICIP() {}
 
@@ -30,44 +30,47 @@ namespace sctl {
       }
     }
 
-    for (Long i = comm.Rank(); i < InterpOrder; i+=comm.Size()) { // Read R, Rinv from file or compute if file doesn't exist
-      const auto fname = [this](const Long idx, const std::string& suffix) {
-        std::string fname_ = "precomp/" + Name();
-        fname_ += "-dmax" + std::to_string((Integer)round<Real>(log<Real>(d_max)/log<Real>(0.1)));
-        fname_ += "-dmin" + std::to_string((Integer)round<Real>(log<Real>(d_min)/log<Real>(0.1)));
-        fname_ += "-p" + std::to_string(InterpOrder);
-        fname_ += "-idx" + std::to_string(idx) + suffix;
-        return fname_;
-      };
+    if (icip_type != ICIPType::Adaptive && precomp_radius != radius) {
+      precomp_radius = radius; // so we don't reload files from disk each time
+      for (Long i = comm.Rank(); i < InterpOrder; i+=comm.Size()) { // Read R, Rinv from file or compute if file doesn't exist
+        const auto fname = [this](const Long idx, const std::string& suffix) {
+          std::string fname_ = "precomp/" + Name();
+          fname_ += "-dmax" + std::to_string((Integer)round<Real>(log<Real>(d_max)/log<Real>(0.1)));
+          fname_ += "-dmin" + std::to_string((Integer)round<Real>(log<Real>(d_min)/log<Real>(0.1)));
+          fname_ += "-p" + std::to_string(InterpOrder);
+          fname_ += "-idx" + std::to_string(idx) + suffix;
+          return fname_;
+        };
 
-      // Read from file
-      precomp_R[i].ReInit(0,0);
-      precomp_Rinv[i].ReInit(0,0);
-      precomp_R[i].template Read<QuadReal>(fname(i,"-R.mat").c_str());
-      precomp_Rinv[i].template Read<QuadReal>(fname(i,"-Rinv.mat").c_str());
+        // Read from file
+        precomp_R[i].ReInit(0,0);
+        precomp_Rinv[i].ReInit(0,0);
+        precomp_R[i].template Read<QuadReal>(fname(i,"-R.mat").c_str());
+        precomp_Rinv[i].template Read<QuadReal>(fname(i,"-Rinv.mat").c_str());
 
-      if (precomp_R[i].Dim(0)*precomp_R[i].Dim(1) == 0 || precomp_Rinv[i].Dim(0)*precomp_Rinv[i].Dim(1) == 0) { // Compute and write to file
-        const Real x = exp<Real>(LogInterpNodes()[i])/2*radius + radius;
-        BuildCompression(&precomp_R[i], &precomp_Rinv[i], -x, 0, x, 0, radius, machine_eps<Real>());
-        if (std::is_same<Real,QuadReal>::value) { // Write to file
-          precomp_R[i].template Write<QuadReal>(fname(i,"-R.mat").c_str());
-          precomp_Rinv[i].template Write<QuadReal>(fname(i,"-Rinv.mat").c_str());
+        if (precomp_R[i].Dim(0)*precomp_R[i].Dim(1) == 0 || precomp_Rinv[i].Dim(0)*precomp_Rinv[i].Dim(1) == 0) { // Compute and write to file
+          const Real x = exp<Real>(LogInterpNodes()[i])/2*radius + radius;
+          BuildCompression(&precomp_R[i], &precomp_Rinv[i], -x, 0, x, 0, radius, machine_eps<Real>());
+          if (std::is_same<Real,QuadReal>::value) { // Write to file
+            precomp_R[i].template Write<QuadReal>(fname(i,"-R.mat").c_str());
+            precomp_Rinv[i].template Write<QuadReal>(fname(i,"-Rinv.mat").c_str());
+          }
         }
       }
-    }
-    for (Long i = 0; i < InterpOrder; i++) { // Gather all R, Rinv
-      const Long sender = i % comm.Size();
-      StaticArray<Long,4> mat_size{precomp_R[i].Dim(0), precomp_R[i].Dim(1), precomp_Rinv[i].Dim(0), precomp_Rinv[i].Dim(1)};
-      comm.Bcast(mat_size+0, 4, sender);
+      for (Long i = 0; i < InterpOrder; i++) { // Gather all R, Rinv
+        const Long sender = i % comm.Size();
+        StaticArray<Long,4> mat_size{precomp_R[i].Dim(0), precomp_R[i].Dim(1), precomp_Rinv[i].Dim(0), precomp_Rinv[i].Dim(1)};
+        comm.Bcast(mat_size+0, 4, sender);
 
-      if (comm.Rank() != sender) {
-        precomp_R[i].ReInit(mat_size[0], mat_size[1]);
-        precomp_Rinv[i].ReInit(mat_size[2], mat_size[3]);
+        if (comm.Rank() != sender) {
+          precomp_R[i].ReInit(mat_size[0], mat_size[1]);
+          precomp_Rinv[i].ReInit(mat_size[2], mat_size[3]);
+        }
+        comm.Bcast(precomp_R[i].begin(), mat_size[0]*mat_size[1], sender);
+        comm.Bcast(precomp_Rinv[i].begin(), mat_size[2]*mat_size[3], sender);
       }
-      comm.Bcast(precomp_R[i].begin(), mat_size[0]*mat_size[1], sender);
-      comm.Bcast(precomp_Rinv[i].begin(), mat_size[2]*mat_size[3], sender);
     }
-    SCTL_ASSERT_MSG(comm.Size()==1, "MPI not supported.");
+    SCTL_ASSERT_MSG(comm.Size()==1, "MPI not supported."); // Using MPI only for precomputation
   }
 
   template <class Real, Integer Order> const DiscPanelLst<Real,Order>& ICIP<Real,Order>::GetPanelList() const {
@@ -263,7 +266,8 @@ namespace sctl {
     };
 
     Vector<Real> interp_wts;
-    LagrangeInterp<Real>::Interpolate(interp_wts, LogInterpNodes(), Vector<Real>{log<Real>(d)});
+    const Real scal = 2/log<Real>(d_min/d_max); // scaling to avoid overflow in barycentric interpolation
+    LagrangeInterp<Real>::Interpolate(interp_wts, LogInterpNodes()*scal, Vector<Real>{log<Real>(d)*scal});
     if (R) {
       (*R) = interp_wts[0] * precomp_R[0];
       for (Long i = 1; i < InterpOrder; i++) (*R) += interp_wts[i] * precomp_R[i];

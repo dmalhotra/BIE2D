@@ -162,7 +162,9 @@ namespace sctl {
     mutable Vector<Matrix<Real>> Kcorrec; // blocks to add to Kc
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
     mutable ParallelSolver<Real> solver; // GMRES solver
-    mutable StaticArray<Matrix<Real>,InterpOrder> precomp_R, precomp_Rinv;
+
+    StaticArray<Matrix<Real>,InterpOrder> precomp_R, precomp_Rinv;
+    Real precomp_radius;
 
     PanelLst<Real,Order> panels_near, panels_far;
     Vector<Real> X, Xnear, Xfar;
