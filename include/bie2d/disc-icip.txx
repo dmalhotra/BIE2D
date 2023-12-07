@@ -269,13 +269,25 @@ namespace sctl {
     const Real scal = 2/log<Real>(d_min/d_max); // scaling to avoid overflow in barycentric interpolation
     LagrangeInterp<Real>::Interpolate(interp_wts, LogInterpNodes()*scal, Vector<Real>{log<Real>(d)*scal});
     if (R) {
-      (*R) = interp_wts[0] * precomp_R[0];
-      for (Long i = 1; i < InterpOrder; i++) (*R) += interp_wts[i] * precomp_R[i];
+      const Long N0 = precomp_R[0].Dim(0), N1 = precomp_R[0].Dim(1);
+      if (R->Dim(0) != N0 || R->Dim(1) != N1) R->ReInit(N0, N1);
+      #pragma omp parallel for schedule(static)
+      for (Long j = 0; j < N0*N1; j++) {
+        (*R)[0][j] = interp_wts[0] * precomp_R[0][0][j];
+        for (Long i = 1; i < InterpOrder; i++) (*R)[0][j] += interp_wts[i] * precomp_R[i][0][j];
+      }
+      SCTL_ASSERT(N0 == N1);
+      for (Long i = 0; i < N0; i++) (*R)[i][i] -= 1; // subtract identity, added back in ApplyPrecond()
       if (dof == COORD_DIM) apply_rotation(*R);
     }
     if (Rinv) {
-      (*Rinv) = interp_wts[0] * precomp_Rinv[0];
-      for (Long i = 1; i < InterpOrder; i++) (*Rinv) += interp_wts[i] * precomp_Rinv[i];
+      const Long N0 = precomp_Rinv[0].Dim(0), N1 = precomp_Rinv[0].Dim(1);
+      if (Rinv->Dim(0) != N0 || Rinv->Dim(1) != N1) Rinv->ReInit(N0, N1);
+      #pragma omp parallel for schedule(static)
+      for (Long j = 0; j < N0*N1; j++) {
+        (*Rinv)[0][j] = interp_wts[0] * precomp_Rinv[0][0][j];
+        for (Long i = 1; i < InterpOrder; i++) (*Rinv)[0][j] += interp_wts[i] * precomp_Rinv[i][0][j];
+      }
       if (dof == COORD_DIM) apply_rotation(*Rinv);
     }
   }
@@ -310,8 +322,8 @@ namespace sctl {
     SCTL_ASSERT(U.Dim() == panel_lst.Size()*Order*dof1);
     U.SetZero();
 
-    Matrix<Real> U_, F_; // temporary memory
-    for (Long i = 0; i < block_lst.Dim(); i++) {
+    Matrix<Real> U_, F_; // temporary memory // TODO: (use memory buffers)
+    for (Long i = 0; i < block_lst.Dim(); i++) { // TODO: parallelize
       const auto& block = block_lst[i];
       const Long offset_disc0 = (panel_lst.PanelIdxOffset(block.disc_idx0) + block.panel_idx_range0[0]) * Order;
       const Long offset_disc1 = (panel_lst.PanelIdxOffset(block.disc_idx1) + block.panel_idx_range1[0]) * Order;
@@ -339,7 +351,7 @@ namespace sctl {
       Vector<Real> R_sigma;
       ApplyPrecond(&R_sigma, sigma);
       this->ApplyBIOpDirect(U, R_sigma);
-      { // U -= R_sigma_far
+      { // U -= R_sigma_far // TODO: optimize
         Vector<Real> R_sigma_far, R_sigma_far_;
         Split(nullptr, &R_sigma_far, R_sigma);
         Merge(&R_sigma_far_, Vector<Real>(), R_sigma_far);
@@ -366,13 +378,7 @@ namespace sctl {
       Setup();
       if (U->Dim() != N) U->ReInit(N);
       this->ApplyMatrixBlocks(*U, sigma, this->disc_panels, this->disc_panels.GetNearList(), Rprecon);
-      { // U += sigma_far
-        Vector<Real> sigma_far, sigma_far_;
-        Split(nullptr, &sigma_far, sigma);
-        Merge(&sigma_far_, Vector<Real>(), sigma_far);
-        (*U) += sigma_far_;
-      }
-
+      (*U) += sigma;
     } else {
       (*U) = sigma; // identity
     }

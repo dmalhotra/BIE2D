@@ -263,7 +263,7 @@ namespace sctl {
 
     if (v_near) {
       if (v_near->Dim() != Nnear*dof) v_near->ReInit(Nnear*dof);
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < near_cnt.Dim(); i++) {
         const Long offset_orig = near_dsp_orig[i];
         const Long offset = near_dsp[i];
@@ -276,7 +276,7 @@ namespace sctl {
     }
     if (v_far) {
       if (v_far->Dim() != Nfar*dof) v_far->ReInit(Nfar*dof);
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < far_cnt.Dim(); i++) {
         const Long offset_orig = far_dsp_orig[i];
         const Long offset = far_dsp[i];
@@ -300,7 +300,7 @@ namespace sctl {
 
     if (v->Dim() != N*dof) v->ReInit(N*dof);
     if (v_near.Dim()) {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < near_cnt.Dim(); i++) {
         const Long offset_orig = near_dsp_orig[i];
         const Long offset = near_dsp[i];
@@ -311,7 +311,7 @@ namespace sctl {
         }
       }
     } else {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < near_cnt.Dim(); i++) {
         const Long offset_orig = near_dsp_orig[i]*dof;
         for (Long j = 0; j < near_cnt[i]*dof; j++) {
@@ -320,7 +320,7 @@ namespace sctl {
       }
     }
     if (v_far .Dim()) {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < far_cnt.Dim(); i++) {
         const Long offset_orig = far_dsp_orig[i];
         const Long offset = far_dsp[i];
@@ -331,7 +331,7 @@ namespace sctl {
         }
       }
     } else {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < far_cnt.Dim(); i++) {
         const Long offset_orig = far_dsp_orig[i]*dof;
         for (Long j = 0; j < far_cnt[i]*dof; j++) {

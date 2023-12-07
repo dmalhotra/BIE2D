@@ -131,8 +131,8 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& sigma) const {
-    Vector<Real> sigma_near, sigma_far;
-    Vector<Real> sigma_near_, sigma_far_;
+    static Vector<Real> sigma_near, sigma_far; // TODO: use buffers instead of static
+    static Vector<Real> sigma_near_, sigma_far_;
     this->Split(&sigma_near, &sigma_far, sigma);
     this->Merge(&sigma_near_, sigma_near, Vector<Real>());
     this->Merge(&sigma_far_, Vector<Real>(), sigma_far);
@@ -145,6 +145,7 @@ namespace sctl {
       const Long N = wt.Dim();
       const Long dof = sigma.Dim() / N;
       SCTL_ASSERT(sigma.Dim() == N * dof);
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < N; i++) {
         for (Long k = 0; k < dof; k++) {
           sigma[i*dof+k] *= wt[i] * scal;

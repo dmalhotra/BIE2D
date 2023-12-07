@@ -110,8 +110,8 @@ namespace sctl {
             const Long N0 = end0-start0;
             const Long N1 = end1-start1;
 
-            const auto Xt = disc_panels.SurfCoord(-1);
-            Vector<Real> Xt_((N0+N1)*Order*COORD_DIM);
+            const auto& Xt = disc_panels.SurfCoord(-1);
+            Vector<Real> Xt_((N0+N1)*Order*COORD_DIM); // prealloc?
             for (Long j = 0; j < N0*Order*COORD_DIM; j++) Xt_[                   j] = Xt[start0*Order*COORD_DIM+j];
             for (Long j = 0; j < N1*Order*COORD_DIM; j++) Xt_[N0*Order*COORD_DIM+j] = Xt[start1*Order*COORD_DIM+j];
 
@@ -163,7 +163,7 @@ namespace sctl {
           }
         }
 
-        Vector<Real> U0, U1, U_; // temporary memory
+        static Vector<Real> U0, U1, U_; // temporary memory // TODO: use buffers instead of static
         for (Long i = 0; i < near_lst.Dim(); i++) {
           const auto& near_block = near_lst[i];
           const Long offset_disc0 = (disc_panels.PanelIdxOffset(near_block.disc_idx0) + near_block.panel_idx_range0[0]) * Order;
@@ -180,8 +180,8 @@ namespace sctl {
 
           U0.SetZero();
           U1.SetZero();
-          Kernel::template Eval<Real,true>(U0, Xnear, Xs0, Xn0, F0_, -1, Ptr2ConstItr<char>(&ker,sizeof(ker)));
-          Kernel::template Eval<Real,true>(U1, Xnear, Xs1, Xn1, F1_, -1, Ptr2ConstItr<char>(&ker,sizeof(ker)));
+          Kernel::template Eval<Real,false/*TODO: slower with OpenMP*/>(U0, Xnear, Xs0, Xn0, F0_, -1, Ptr2ConstItr<char>(&ker,sizeof(ker)));
+          Kernel::template Eval<Real,false/*TODO: slower with OpenMP*/>(U1, Xnear, Xs1, Xn1, F1_, -1, Ptr2ConstItr<char>(&ker,sizeof(ker)));
           U0 += U1;
 
           Merge(&U_, U0, Vector<Real>());
@@ -207,7 +207,7 @@ namespace sctl {
 
     if (v_near) {
       if (v_near->Dim() != Nnear*dof) v_near->ReInit(Nnear*dof);
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < near_cnt.Dim(); i++) {
         const Long offset_orig = near_dsp_orig[i];
         const Long offset = near_dsp[i];
@@ -220,7 +220,7 @@ namespace sctl {
     }
     if (v_far) {
       if (v_far->Dim() != Nfar*dof) v_far->ReInit(Nfar*dof);
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < far_cnt.Dim(); i++) {
         const Long offset_orig = far_dsp_orig[i];
         const Long offset = far_dsp[i];
@@ -244,7 +244,7 @@ namespace sctl {
 
     if (v->Dim() != N*dof) v->ReInit(N*dof);
     if (v_near.Dim()) {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < near_cnt.Dim(); i++) {
         const Long offset_orig = near_dsp_orig[i];
         const Long offset = near_dsp[i];
@@ -255,7 +255,7 @@ namespace sctl {
         }
       }
     } else {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < near_cnt.Dim(); i++) {
         const Long offset_orig = near_dsp_orig[i]*dof;
         for (Long j = 0; j < near_cnt[i]*dof; j++) {
@@ -264,7 +264,7 @@ namespace sctl {
       }
     }
     if (v_far .Dim()) {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < far_cnt.Dim(); i++) {
         const Long offset_orig = far_dsp_orig[i];
         const Long offset = far_dsp[i];
@@ -275,7 +275,7 @@ namespace sctl {
         }
       }
     } else {
-      #pragma omp parallel for schedule(static)
+      //#pragma omp parallel for schedule(static)
       for (Long i = 0; i < far_cnt.Dim(); i++) {
         const Long offset_orig = far_dsp_orig[i]*dof;
         for (Long j = 0; j < far_cnt[i]*dof; j++) {
