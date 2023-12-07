@@ -42,7 +42,7 @@ namespace sctl {
       near_dsp_orig.ReInit(N);
       near_dsp.ReInit(N);
       near_cnt.ReInit(N);
-      near_dsp[0] = 0;
+      if (N) near_dsp[0] = 0;
 
       for (Long i = 0; i < N; i++) {
         const Long n0 = panel_range[i*2+0];
