@@ -11,5 +11,6 @@
 #include <bie2d/disc-icip.hpp>
 #include <bie2d/kernels.hpp>
 #include <bie2d/disc-panel-lst.hpp>
+#include <bie2d/utils.hpp>
 
 #endif

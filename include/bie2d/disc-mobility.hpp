@@ -17,7 +17,7 @@ namespace sctl {
 
     public:
 
-    DiscMobility(const Comm& comm_ = Comm::Self());
+    DiscMobility(const Comm& comm_ = Comm::Self(), const bool verbose = true);
 
     virtual ~DiscMobility() = default;
 

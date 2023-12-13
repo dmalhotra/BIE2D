@@ -23,7 +23,7 @@ namespace sctl {
 
     public:
 
-    ICIP(const Comm& comm_ = Comm::Self());
+    ICIP(const Comm& comm_ = Comm::Self(), const bool verbose = true);
 
     virtual ~ICIP();
 

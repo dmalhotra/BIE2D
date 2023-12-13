@@ -1,6 +1,6 @@
 namespace sctl {
 
-  template <class Real, Integer Order> ICIP<Real,Order>::ICIP(const Comm& comm_) : comm(comm_), solver(comm, true), precomp_radius(0) {}
+  template <class Real, Integer Order> ICIP<Real,Order>::ICIP(const Comm& comm_, const bool verbose) : comm(comm_), solver(comm, verbose), precomp_radius(0) {}
 
   template <class Real, Integer Order> ICIP<Real,Order>::~ICIP() {}
 

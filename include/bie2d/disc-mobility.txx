@@ -1,6 +1,6 @@
 namespace sctl {
 
-  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_) : ICIP_Base(comm_), StokesSL_BIOp(this->comm), StokesDL_BIOp(this->comm) {}
+  template <class Real, Integer Order> DiscMobility<Real,Order>::DiscMobility(const Comm& comm_, const bool verbose) : ICIP_Base(comm_, verbose), StokesSL_BIOp(this->comm), StokesDL_BIOp(this->comm) {}
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
