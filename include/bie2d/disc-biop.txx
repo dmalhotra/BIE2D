@@ -91,9 +91,11 @@ namespace sctl {
       Vector<Real> F_near, F_far, U_, U__;
       Split(&F_near, &F_far, F);
       biop_f2a.ComputePotential(U, F_far);
-      biop_n2f.ComputePotential(U_, F_near);
-      Merge(&U__, Vector<Real>(), U_);
-      U += U__;
+      if (F_near.Dim()) {
+        biop_n2f.ComputePotential(U_, F_near);
+        Merge(&U__, Vector<Real>(), U_);
+        U += U__;
+      }
 
       { // Subtract contributions to/from the two side panels of each close-to-touching block.
         const auto& near_lst = disc_panels.GetNearList();
@@ -201,7 +203,7 @@ namespace sctl {
     if ((v_near == nullptr && v_far == nullptr) || !far_cnt.Dim()) return;
     const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
     const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
-    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
+    const Long Nnear = (near_dsp.Dim() ? near_dsp.end()[-1] + near_cnt.end()[-1] : 0);
     const Long dof = v.Dim() / N;
     SCTL_ASSERT(v.Dim() == N*dof);
 
@@ -294,8 +296,8 @@ namespace sctl {
     SCTL_ASSERT(F.Dim() == panel_lst.Size()*Order*dof0);
     SCTL_ASSERT(U.Dim() == panel_lst.Size()*Order*dof1);
 
-    Matrix<Real> U_, F_; // temporary memory
-    for (Long i = 0; i < block_lst.Dim(); i++) {
+    Matrix<Real> U_, F_; // temporary memory // TODO: (use memory buffers)
+    for (Long i = 0; i < block_lst.Dim(); i++) { // TODO: parallelize
       const auto& block = block_lst[i];
       const Long offset_disc0 = (panel_lst.PanelIdxOffset(block.disc_idx0) + block.panel_idx_range0[0]) * Order;
       const Long offset_disc1 = (panel_lst.PanelIdxOffset(block.disc_idx1) + block.panel_idx_range1[0]) * Order;

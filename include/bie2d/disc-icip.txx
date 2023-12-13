@@ -312,7 +312,7 @@ namespace sctl {
     }
   }
 
-  template <class Real, Integer Order> void ICIP<Real,Order>::ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order>& panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst) {
+  template <class Real, Integer Order> void ICIP<Real,Order>::ApplyMatrixBlocks(Vector<Real>& U, const Vector<Real>& F, const DiscPanelLst<Real,Order>& panel_lst, const Vector<typename DiscPanelLst<Real,Order>::NearData>& block_lst, const Vector<Matrix<Real>>& M_lst) { // TODO: instead reuse DiscBIOp::ApplyMatrixBlocks()
     SCTL_ASSERT(block_lst.Dim() == M_lst.Dim());
     if (block_lst.Dim() == 0) return;
 

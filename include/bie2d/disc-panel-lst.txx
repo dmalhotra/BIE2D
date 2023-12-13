@@ -257,7 +257,7 @@ namespace sctl {
     if ((v_near == nullptr && v_far == nullptr) || !far_cnt.Dim()) return;
     const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
     const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
-    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
+    const Long Nnear = (near_dsp.Dim() ? near_dsp.end()[-1] + near_cnt.end()[-1] : 0);
     const Long dof = v.Dim() / N;
     SCTL_ASSERT(v.Dim() == N*dof);
 
@@ -293,7 +293,7 @@ namespace sctl {
     if (v == nullptr || !far_cnt.Dim()) return;
     const Long N = far_dsp_orig.end()[-1] +  far_cnt.end()[-1];
     const Long Nfar  =  far_dsp.end()[-1] +  far_cnt.end()[-1];
-    const Long Nnear = near_dsp.end()[-1] + near_cnt.end()[-1];
+    const Long Nnear = (near_dsp.Dim() ? near_dsp.end()[-1] + near_cnt.end()[-1] : 0);
     const Long dof = (v_near.Dim() ? v_near.Dim()/Nnear : v_far.Dim()/Nfar);
     if (v_near.Dim()) SCTL_ASSERT(v_near.Dim() == Nnear*dof);
     if ( v_far.Dim()) SCTL_ASSERT( v_far.Dim() ==  Nfar*dof);
