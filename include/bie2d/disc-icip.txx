@@ -37,16 +37,10 @@ namespace sctl {
 
   template <class Real, Integer Order> void ICIP<Real,Order>::BuildCompression(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius, const Real tol) const {
 
-    std::cout << "\n\nInside BuildCompression \n";   
-
     DiscPanelLst<Real,Order> panels_coarse, panels_fine;
-    std::cout << "Defined panels_coarse and panels_fine\n";
     const auto Xc = Vector<Real>({x0,y0,x1,y1});
-    std::cout << "Defined Xc " << x0 << " " << y0 << " " << x1 << " " << y1 << "\n";
     panels_coarse.Init(Xc, radius, false, d_max);
-    std::cout << "Initialized panels_coarse \n";
     panels_fine  .Init(Xc, radius,  true, d_max);
-    std::cout << "Initialized panels_fine \n";
 
     if (panels_coarse.GetNearList().Dim() && panels_fine.GetNearList().Dim()) {
       SCTL_ASSERT(panels_coarse.GetNearList().Dim() == 1);
@@ -63,14 +57,11 @@ namespace sctl {
         std::swap(interac_fine.panel_idx_range0[0], interac_fine.panel_idx_range1[0]);
         std::swap(interac_fine.panel_idx_range0[1], interac_fine.panel_idx_range1[1]);
       }
-      std::cout << "Organized interaction panels \n";
 
       Matrix<Real> Kf, Kf_inv;
-      std::cout << "Going to build the interaction block \n";
       BuildInteracBlock(Kf, panels_fine, interac_fine, tol);
       Kf_inv = Matrix<Real>(Kf).pinv(tol);
       SCTL_ASSERT(Kf.Dim(0) == Kf.Dim(1));
-      std::cout << "Interaction block built \n";
 
       Matrix<Real> Wc_inv, Wf;
       { // Build Wc_inv, Wf
@@ -94,8 +85,6 @@ namespace sctl {
 
         const Integer dof = Kf.Dim(0) / Nf;
         SCTL_ASSERT(Kf.Dim(0) == Nf * dof);
-	
-	std::cout << "Building Wc_inv and Wc: \n";
 
         Wc_inv.ReInit(Nc*dof, Nc*dof); Wc_inv.SetZero();
         for (Long i = 0; i < Nc; i++) {
@@ -113,7 +102,6 @@ namespace sctl {
       }
 
       Matrix<Real> P;
-      std::cout << "Building P \n";
       { // Build P
         const auto get_theta_breaks = [](Vector<Real>& T0, Vector<Real>& T1, const DiscPanelLst<Real,Order>& panels, const typename DiscPanelLst<Real,Order>::NearData& interac) {
           const Long offset0 = interac.panel_idx_range0[0];
@@ -131,7 +119,6 @@ namespace sctl {
           T1[count1] = (offset1+count1<TT1.Dim() ? TT1[offset1+count1] : TT1[0]+2*const_pi<Real>());
         };
         Vector<Real> Tc0, Tc1, Tf0, Tf1;
-	std::cout << "Getting breaks of the panels \n";
         get_theta_breaks(Tc0, Tc1, panels_coarse, interac_coarse);
         get_theta_breaks(Tf0, Tf1, panels_fine  , interac_fine  );
 
@@ -148,7 +135,6 @@ namespace sctl {
           P.SetZero();
 
           Long src_panel_idx = 0;
-	  std::cout << "Tagging sources and targets \n";
           Vector<Real> nds_src, nds_trg, P_(Order*Order); // temporary storage
           for (Long trg_panel_idx = 0; trg_panel_idx < Nf; trg_panel_idx++) {
             while (src_panel_idx<Nc-1 && Tc[src_panel_idx+1]<Tf[trg_panel_idx+1]) src_panel_idx++;
@@ -181,8 +167,6 @@ namespace sctl {
         const Long Nf1 = P1.Dim(1);
         const Long dof = Kf.Dim(0) / (Nf0+Nf1);
         SCTL_ASSERT(Kf.Dim(0) == (Nf0+Nf1)*dof);
-	
-	std::cout << "Filling P \n";
 
         P.ReInit((Nc0+Nc1)*dof, (Nf0+Nf1)*dof); P.SetZero();
         for (Long i = 0; i < Nc0; i++) {
@@ -201,12 +185,10 @@ namespace sctl {
         }
       }
       
-      std::cout << "Building R with RCIP \n";
       const auto R_ = P * Kf_inv * Wf * P.Transpose() * Wc_inv;
 
       if (R != nullptr) (*R) = R_;
       if (Rinv != nullptr) (*Rinv) = Matrix<Real>(R_).pinv(tol);
-      std::cout << "Finish building the compression \n\n\n";
     }
   }
 
@@ -219,30 +201,30 @@ namespace sctl {
     //
     // IF THERE IS NO FILE THEN BUILD THE PRECOMPUTED R and Rinv
     const auto& leg_nds = LegQuadRule<Real>::ComputeNds(InterpOrder); // compute Legendre nodes in [-1,1]
-    const char *fRnum;
+    const char *fRnum, *fRinvnum;
     
     std::string fR = "include/bie2d/precomputed/R";
     std::string fRinv = "include/bie2d/precomputed/Rinv";
-    std::string s1, s2;
+    std::string s1, s2, s3, s4;
     if( icip_type_ == ICIPType::Precond){
       s1 = fR + sep + std::to_string(0) + ".bin";
       s2 = fR + sep + std::to_string(InterpOrder-1) + ".bin";
     }
     else{
-      s1 = fRinv + sep + std::to_string(0) + ".bin";
-      s2 = fRinv + sep + std::to_string(InterpOrder-1) + ".bin";
+      s3 = fRinv + sep + std::to_string(0) + ".bin";
+      s4 = fRinv + sep + std::to_string(InterpOrder-1) + ".bin";
     }
     // CHECK IF NECESSARY FILES EXIST
-    if( (access( s1.c_str(), F_OK ) == -1 || access( s2.c_str(), F_OK ) == -1) && icip_type_ == ICIPType::Compress ){
+    if( (access( s1.c_str(), F_OK ) == -1 || access( s2.c_str(), F_OK ) == -1) && R != nullptr ){
       // IF THERE IS NO FIRST FILE OR LAST FILE THEN BUILD R (COMPRESS)
       std::cout << "\nCreating files for InterpOrder: "<< InterpOrder << "\n";
       Matrix<Real> R0[InterpOrder], Rinv0[InterpOrder];
       for (Long i = 0; i < InterpOrder; i++) { // loop over interpolation nodes
        // get name of file
-       s1 = fR + sep + std::to_string(i) + ".bin";
-       fRnum = s1.c_str();
+       s2 = fR + sep + std::to_string(i) + ".bin";
+       fRnum = s2.c_str();
        // transform to log Legendre and get the new centers of the discs
-       const Real x = (d_min/2) * exp(log(d_max/d_min)*(leg_nds[i] + 1)/2) + radius;
+       const Real x = radius + radius*(d_min/2) * exp(log(d_max/d_min)*(leg_nds[i] + 1)/2);
        //
        // Compute R and for this distance in particular
        std::cout << "\nBuilding precompression for log Legendre for i: "<< i << "\n";
@@ -257,52 +239,116 @@ namespace sctl {
 
       }
     }
-    // else if( (access( s1.c_str(), F_OK ) == -1 || access( s2.c_str(), F_OK ) == -1) && icip_type_ == ICIPType::Precond ){
-    //   // IF THERE IS NO FIRST FILE OR LAST FILE THEN BUILD Rinv (Preconditioning)
-    //   Matrix<Real> R0[InterpOrder], Rinv0[InterpOrder];
-    //   for (Long i = 0; i < InterpOrder; i++) { // loop over interpolation nodes
-    //    // get name of file
-    //    s2 = fRinv + sep + std::to_string(i) + ".bin";
-    //    fRinvnum = s2.c_str();
-    //    // transform to log Legendre and get the new centers of the discs
-    //    const Real x = (d_min/2) * exp(log(d_max/d_min)*(leg_nds[i] + 1)/2) + radius;
-    //    //
-    //    // Compute R and Rinv for this distance in particular
-    //    std::cout << "\nBuilding precompression for log Legendre\n";
-    //    BuildCompression(&R0[i], &Rinv0[i], -x, 0, x, 0, radius, tol);
+    if( (access( s3.c_str(), F_OK ) == -1 || access( s4.c_str(), F_OK ) == -1) && Rinv != nullptr ){
+      // IF THERE IS NO FIRST FILE OR LAST FILE THEN BUILD Rinv (Preconditioning)
+      Matrix<Real> R0[InterpOrder], Rinv0[InterpOrder];
+      for (Long i = 0; i < InterpOrder; i++) { // loop over interpolation nodes
+       // get name of file
+       s4 = fRinv + sep + std::to_string(i) + ".bin";
+       fRinvnum = s4.c_str();
+       // transform to log Legendre and get the new centers of the discs
+       const Real x = radius + radius*(d_min/2) * exp(log(d_max/d_min)*(leg_nds[i] + 1)/2);
+       //
+       // Compute R and Rinv for this distance in particular
+       std::cout << "\nBuilding precompression for log Legendre\n";
+       BuildCompression(&R0[i], &Rinv0[i], -x, 0, x, 0, radius, tol);
      
-    //    // Save as a binary file using the SCTL library
-    //    std::cout << "Save to file: \n";
-    //    std::cout << fRinvnum << std::endl;
-    //    Rinv0[i].template Write<double>(fRinvnum);
-    //   }
-
-    // }
-    // INTERPOLATE
-    std::cout << "\nStarting interpolation part\n";
-    const Real d = log( sqrt( (x0-x1)*(x0-x1 ) + (y0-y1)*(y0-y1) ) - 2*radius);
-    const auto& leg_sh = log(d_min) + (log(d_max/d_min))*(leg_nds + 1)/2;
-    const auto& leg_wts = LegQuadRule<Real>::ComputeWts(leg_sh); // compute integration weights
-    Real l = (d - leg_sh[0]); // l(x) in Barycentric interpolation
-    // Read from s1
-    fRnum = s1.c_str();
-    Matrix<Real> Ri[InterpOrder];
-    Matrix<Real> Rtemp;
-    Ri[0].template Read(fRnum); // First matrix
-    Rtemp = leg_wts[0]/(d - leg_sh[0])*Ri[0];
-    for( Long i = 1; i<InterpOrder; i++){
-      // Loop over lege nodes
-      std::cout << "\nLooping over nodes\n";
-      l *= (d - leg_sh[i]);
-      s1 = fR + sep + std::to_string(i) + ".bin";
-      fRnum = s1.c_str();
-      Ri[i].template Read(fRnum); // read matrix
-      Rtemp = leg_wts[i]/(d - leg_sh[i])*Ri[i];
+       // Save as a binary file using the SCTL library
+       std::cout << "Save to file: \n";
+       std::cout << fRinvnum << std::endl;
+       Rinv0[i].template Write<double>(fRinvnum);
+      }
     }
-    BuildCompression(R, Rinv, x0, y0, x1, y1, radius, tol); // compute compression on-the-fly
-    const auto R_ = l*Rtemp;
+    
+    // INTERPOLATE
+    const Real d = log((sqrt( (x0-x1)*(x0-x1 ) + (y0-y1)*(y0-y1) ) - 2*radius)/(radius*d_min))/log(d_max/d_min);
+    
+    // Get w for Barycentric interpolation
+    Vector<Real> w(InterpOrder);
+    Real maxNorm = 0;
+    for( Integer j = 0; j<InterpOrder; j++){
+      Real w_inv = 1;
+      Real this_node = leg_nds[j];
+      for( Integer k = 0  ; k< j         ; k++) w_inv *= leg_nds[k] - this_node;
+      for( Integer k = j+1; k<InterpOrder; k++) w_inv *= leg_nds[k] - this_node;
+      w[j] = 1/w_inv;
+      if( w[j] > maxNorm) maxNorm = w[j];
+    }
+    w = w/maxNorm;
+    //std::cout << "maxNorm: " << maxNorm << "\n";
+    
+    // Build R interpolated if it's not a null pointer
+    Matrix<Real> Rtemp;
+    Matrix<Real> RinvTemp;
+    if( R!= nullptr ){
+      Matrix<Real> Ri[InterpOrder];
+      std::cout << "Interpolating R for " << icip_type_ << "\n";
+      s1 = fR + sep + std::to_string(0) + ".bin";
+      fRnum = s1.c_str();
+      Ri[0].template Read<double>(fRnum); // First matrix
+      Long init = 1;
+      if( fabs(d - leg_nds[0])<tol){
+        init = InterpOrder;
+	Rtemp = Ri[0];
+      }
+      Real coef = w[0]/(d - leg_nds[0]);
+      Real denom = w[0]/(d - leg_nds[0]);
+      Rtemp = coef*Ri[0];
+      // Iterate
+      for( Long i = init; i<InterpOrder; i++){
+        s1 = fR + sep + std::to_string(i) + ".bin";
+	fRnum = s1.c_str();
+        Ri[i].template Read<double>(fRnum); // Read matrix from file
+        if( fabs(d - leg_nds[i])<tol){
+	  Rtemp = Ri[i];
+	  break;
+	}
+        coef = w[i]/(d - leg_nds[i]);
+	denom += coef;
+	Rtemp += coef*Ri[i];
+      }
+      Rtemp = Rtemp/denom;
+    }
+    // Build Rinv interpolated if it's not a null pointer
+    if( Rinv!= nullptr ){
+      Matrix<Real> Rinvi[InterpOrder];
+      std::cout << "Interpolating Rinv for " << icip_type_ << "\n";
+      s3 = fRinv + sep + std::to_string(0) + ".bin";
+      fRnum = s3.c_str();
+      Rinvi[0].template Read<double>(fRnum); // First matrix
+      Long init = 1;
+      if( fabs(d - leg_nds[0])<tol){
+        init = InterpOrder;
+	RinvTemp = Rinvi[0];
+      }
+      Real coef = w[0]/(d - leg_nds[0]);
+      Real denom = w[0]/(d - leg_nds[0]);
+      RinvTemp = coef*Rinvi[0];
+      // Iterate
+      for( Long i = init; i<InterpOrder; i++){
+        s3 = fRinv + sep + std::to_string(i) + ".bin";
+	fRinvnum = s3.c_str();
+        Rinvi[i].template Read<double>(fRinvnum); // Read matrix from file
+        if( fabs(d - leg_nds[i])<tol){
+	  RinvTemp = Rinvi[i];
+	  break;
+	}
+        coef = w[i]/(d - leg_nds[i]);
+	denom += coef;
+	RinvTemp += coef*Rinvi[i];
+      }
+      RinvTemp = RinvTemp/denom;
+    }
+    else{
+      BuildCompression(&Rtemp, &RinvTemp, x0, y0, x1, y1, radius, tol); // compute compression on-the-fly
+    }
+    
+    const auto R_ = Rtemp;
     if(R != nullptr) (*R) = R_;
+    const auto Rinv_ = RinvTemp;
+    if(Rinv != nullptr) (*Rinv) = Rinv_;
   }
+  
 
   template <class Real, Integer Order> void ICIP<Real,Order>::Setup() const {
     const auto& near_lst = disc_panels.GetNearList();

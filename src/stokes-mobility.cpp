@@ -27,12 +27,14 @@ int main() {
 
   Vector<Real> X(Ndisc*COORD_DIM), F(Ndisc*3);
   { // Set F, X
-    const Real eps = 1e-5;
+    const Real eps = 4.6509e-9;
 
     X = 0;
-    X[0] = -(R+eps/2)*sqrt<Real>(0.5); X[1] = -(R+eps/2)*sqrt<Real>(0.5);
-    X[2] =  (R+eps/2)*sqrt<Real>(0.5); X[3] =  (R+eps/2)*sqrt<Real>(0.5);
+    // X[0] = -(R+eps/2)*sqrt<Real>(0.5); X[1] = -(R+eps/2)*sqrt<Real>(0.5);
+    // X[2] =  (R+eps/2)*sqrt<Real>(0.5); X[3] =  (R+eps/2)*sqrt<Real>(0.5);
     //X[4] =  0.0; X[5] =-0.5;
+    X[0] = -R/2*eps - R; X[1] = 0;
+    X[2] =  R/2*eps + R; X[3] =  0;
 
     F = 0;
     F[0] = 0; F[1] = 1; F[2] = 0;
