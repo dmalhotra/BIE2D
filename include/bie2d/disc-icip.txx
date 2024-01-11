@@ -224,7 +224,7 @@ namespace sctl {
        s2 = fR + sep + std::to_string(i) + ".bin";
        fRnum = s2.c_str();
        // transform to log Legendre and get the new centers of the discs
-       const Real x = radius + radius*(d_min/2) * exp(log(d_max/d_min)*(leg_nds[i] + 1)/2);
+       const Real x = radius + radius*(d_min/2) * exp(log(d_max/d_min)*leg_nds[i]);
        //
        // Compute R and for this distance in particular
        std::cout << "\nBuilding precompression for log Legendre for i: "<< i << "\n";
@@ -247,7 +247,7 @@ namespace sctl {
        s4 = fRinv + sep + std::to_string(i) + ".bin";
        fRinvnum = s4.c_str();
        // transform to log Legendre and get the new centers of the discs
-       const Real x = radius + radius*(d_min/2) * exp(log(d_max/d_min)*(leg_nds[i] + 1)/2);
+       const Real x = radius + radius*(d_min/2) * exp(log(d_max/d_min)*leg_nds[i]);
        //
        // Compute R and Rinv for this distance in particular
        std::cout << "\nBuilding precompression for log Legendre\n";
@@ -339,9 +339,9 @@ namespace sctl {
       }
       RinvTemp = RinvTemp/denom;
     }
-    else{
-      BuildCompression(&Rtemp, &RinvTemp, x0, y0, x1, y1, radius, tol); // compute compression on-the-fly
-    }
+    //else{
+    //  BuildCompression(&Rtemp, &RinvTemp, x0, y0, x1, y1, radius, tol); // compute compression on-the-fly
+    //}
     
     const auto R_ = Rtemp;
     if(R != nullptr) (*R) = R_;

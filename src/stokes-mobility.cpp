@@ -14,7 +14,7 @@ template <Integer ElemOrder, class Real> Vector<Real> DiscMobilitySolve(const Ve
 
   Vector<Real> V;
   disc_mobility.Init(X, R, tol, icip_type);
-  disc_mobility.Solve(V, F, Vector<Real>(), 0.0000001, 2000);
+  disc_mobility.Solve(V, F, Vector<Real>(), tol, 4000);
   return V;
 }
 
