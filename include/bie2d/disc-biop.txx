@@ -124,7 +124,7 @@ namespace sctl {
             disc_panels.template LayerPotentialMatrix<Kernel,-1>(K0, Xt_, tol, start0, end0);
             disc_panels.template LayerPotentialMatrix<Kernel,-1>(K1, Xt_, tol, start1, end1);
 
-            #pragma omp parallel for schedule(static)
+            //#pragma omp parallel for schedule(static)
             for (Long j = Order*KDIM0; j < (N0-1)*Order*KDIM0; j++) {
               for (Long k = Order*KDIM1; k < (N0-1)*Order*KDIM1; k++) {
                 K0[j][k] = 0;
@@ -133,7 +133,7 @@ namespace sctl {
                 K0[j][k] = 0;
               }
             }
-            #pragma omp parallel for schedule(static)
+            //#pragma omp parallel for schedule(static)
             for (Long j = Order*KDIM0; j < (N1-1)*Order*KDIM0; j++) {
               for (Long k = Order*KDIM1; k < (N0-1)*Order*KDIM1; k++) {
                 K1[j][k] = 0;

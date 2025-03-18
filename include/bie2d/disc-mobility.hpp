@@ -15,6 +15,8 @@ namespace sctl {
     static constexpr Integer COORD_DIM = 2;
     using ICIP_Base = ICIP<Real,Order>;
 
+    DiscMobility* tmp_mobil_compress; ///////////////////////
+
     public:
 
     DiscMobility(const Comm& comm_ = Comm::Self(), const bool verbose = true);
@@ -43,7 +45,7 @@ namespace sctl {
      *
      * @param[in] gmres_max_iter maximum number of GMRES iterations.
      */
-    void Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter);
+    void Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter, KrylovPrecond<Real>* guess);
 
     private:
 

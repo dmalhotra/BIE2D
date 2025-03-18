@@ -26,7 +26,7 @@ namespace sctl {
     }
 
     Vector<Real> sigma; // unknown density
-    this->SolveBIE(sigma, v, gmres_tol, gmres_max_iter);
+    this->SolveBIE(sigma, v, gmres_tol, gmres_max_iter, nullptr);
 
     if (Q.Dim() != Ndisc) Q.ReInit(Ndisc);
     { // get charge on each disc

@@ -130,7 +130,7 @@ namespace sctl {
      *
      * @param[in] gmres_max_iter maximum number of GMRES iterations.
      */
-    void SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) const;
+    void SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter, KrylovPrecond<Real>* guess) const;
 
     /**
      * L2 weighting or scaling by the square-root of the surface quadrature
@@ -161,7 +161,7 @@ namespace sctl {
     Vector<Real> sqrt_wts, rsqrt_wts; // weights for L2 weighting
     mutable Vector<Matrix<Real>> Kcorrec; // blocks to add to Kc
     mutable Vector<Matrix<Real>> Rprecon; // block diagonal precond
-    mutable ParallelSolver<Real> solver; // GMRES solver
+    mutable GMRES<Real> solver; // GMRES solver
 
     StaticArray<Matrix<Real>,InterpOrder> precomp_R, precomp_Rinv;
     Real precomp_radius;

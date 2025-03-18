@@ -35,7 +35,11 @@ namespace sctl {
         const Real dx = Xc[2*j]   - Xc[2*k];
         const Real dy = Xc[2*j+1] - Xc[2*k+1];
         const Real dist = sqrt<Real>(dx*dx + dy*dy) - 2*R;
-        SCTL_ASSERT(dist > 0);
+        if (dist <= 0) { // abort
+          R = (Real)-1;
+          return;
+        }
+        //SCTL_ASSERT(dist > 0);
 
         if (dist < close_threshold*R) {
 
@@ -168,6 +172,13 @@ namespace sctl {
         Normal[i].ReInit(panel_count*Order*COORD_DIM, (Iterator<Real>)PanelLstType::SurfNormal().begin() + offset*Order*COORD_DIM, false);
         SurfWts__[i].ReInit(panel_count*Order, (Iterator<Real>)PanelLstType::SurfWts().begin() + offset*Order, false);
         offset += panel_count;
+      }
+
+      theta_break_flat.ReInit(0);
+      for (const auto& t_vec : theta_break) {
+        for (const auto& t : t_vec) {
+          theta_break_flat.PushBack(t);
+        }
       }
     }
 

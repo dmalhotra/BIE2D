@@ -4,14 +4,35 @@ namespace sctl {
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type) {
     ICIP_Base::Init(Xc, R, tol, icip_type);
+    if (this->disc_panels.DiscRadius() <= 0) return; // abort
     RigidVelocityBasis(V0, this->disc_panels);
+
+    /////////////////////////////////////////////////////////////////////////////////////////////
+    //const auto& near_lst = this->disc_panels.GetNearList();
+    //for (const auto& n : near_lst) {
+    //  std::cout<<this->disc_panels.PanelIdxOffset(n.disc_idx0) + n.panel_idx_range0[0]<<' '<<this->disc_panels.PanelIdxOffset(n.disc_idx0) + n.panel_idx_range0[1]<<' ';
+    //  std::cout<<this->disc_panels.PanelIdxOffset(n.disc_idx1) + n.panel_idx_range1[0]<<' '<<this->disc_panels.PanelIdxOffset(n.disc_idx1) + n.panel_idx_range1[1]<<'\n';
+    //}
+    //for (Long i = 0; i < Xc.Dim()/COORD_DIM; i++) {
+    //  std::cout<<this->disc_panels.SurfCoord(i).Dim()<<'\n';
+    //}
 
     const bool exclude_near = (icip_type == ICIPType::Compress || icip_type == ICIPType::Precond);
     StokesDL_BIOp.Init(this->disc_panels, exclude_near, tol);
     StokesSL_BIOp.Init(this->disc_panels, false, tol);
+
+    //if (icip_type == ICIPType::Precond) {
+    //  tmp_mobil_compress = new DiscMobility<Real,Order>(this->comm, true);
+    //  tmp_mobil_compress->Init(Xc, R, tol, ICIPType::Compress);
+    //  // TODO: free
+    //}
   }
 
-  template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter) {
+  template <class Real, Integer Order> void DiscMobility<Real,Order>::Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter, KrylovPrecond<Real>* guess) {
+    if (this->disc_panels.DiscRadius() <= 0) { // abort
+      V.ReInit(0);
+      return;
+    }
     const Long Ndisc = this->disc_panels.DiscCount();
     const Long N = this->disc_panels.Size() * Order * COORD_DIM;
     const Real R = this->disc_panels.DiscRadius();
@@ -36,8 +57,38 @@ namespace sctl {
     Vector<Real> U0; // completion flow velocity
     StokesSL_BIOp.ComputePotential(U0, nu);
 
+    if (0) {///////////////////////////////
+      Matrix<Real> S(F.Dim(), U0.Dim());
+      for (Long i = 0; i < S.Dim(0); i++) {
+        Vector<Real> F(S.Dim(0));
+        F = 0;
+        F[i] = 1;
+
+        Vector<Real> nu; // boundary force
+        { // Set nu
+          nu.ReInit(N);
+          Long offset = 0;
+          for (Long i = 0; i < Ndisc; i++) {
+            const Long N_ = this->disc_panels.SurfWts(i).Dim()*COORD_DIM;
+            const Real inv_circumf = 1/(2*const_pi<Real>()*R);
+            for (Long j = 0; j < N_; j++) {
+              nu[offset+j] = 0;
+              for (Integer k = 0; k < 3; k++) {
+                nu[offset+j] += F[i*3+k] * V0[k][offset+j] * inv_circumf;
+              }
+            }
+            offset += N_;
+          }
+        }
+
+        Vector<Real> U0(S.Dim(1), S[i], false); // completion flow velocity
+        StokesSL_BIOp.ComputePotential(U0, nu);
+      }
+      S.Write("S.mat");
+    }
+
     Vector<Real> sigma; // unknown density
-    this->SolveBIE(sigma, U0, gmres_tol, gmres_max_iter);
+    this->SolveBIE(sigma, U0, gmres_tol, gmres_max_iter, guess);
 
     if (V.Dim() != Ndisc*3) V.ReInit(Ndisc*3);
     { // recover translation and rotation from sigma

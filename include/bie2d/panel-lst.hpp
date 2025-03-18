@@ -5,6 +5,8 @@
 
 namespace sctl {
 
+  struct VTUData;
+
   template <class Real, Integer Order> class PanelLst : public ElementListBase<Real> {
     static constexpr Integer COORD_DIM = 2;
 
@@ -330,6 +332,25 @@ namespace sctl {
       else                  panel_lst.template LayerPotentialMatrix<Kernel,-1>(M, Xt, tol, elem_idx, elem_idx+1);
     }
 
+    /**
+     * Get the VTU (Visualization Toolkit for Unstructured grids) data for
+     * one or all elements.
+     */
+    void GetVTUData(VTUData& vtu_data, const Vector<Real>& F = Vector<Real>(), const Long elem_idx = -1) const;
+
+    /**
+     * Write VTU data to file.
+     *
+     * @param[in] fname the filename.
+     *
+     * @param[in] F the data values at each surface discretization node in
+     * the order AoS order {Ux1,Uy1,Uz1,...,Uxn,Uyn,Uzn}.
+     *
+     * @param[in] comm the communicator.
+     */
+    void WriteVTK(const std::string& fname, const Vector<Real>& F = Vector<Real>(), const Comm& comm = Comm::Self()) const;
+
+
     private:
 
     static Matrix<Real> InterpMat(const Vector<Real>& src_nds, const Vector<Real>& trg_nds) {
@@ -536,8 +557,8 @@ namespace sctl {
             };
             const auto& log_quad_nds = (LogQuadOrder==16 ? log_quad_nds16 : log_quad_nds34);
             const auto& log_quad_wts = (LogQuadOrder==16 ? log_quad_wts16 : log_quad_wts34);
-            static const auto& leg_nds = LegQuadRule<Real>::ComputeNds(Order);
-            static const auto& leg_wts = LegQuadRule<Real>::ComputeWts(leg_nds);
+            static const auto& leg_nds = LegQuadRule<Real>::template nds<Order>();
+            static const auto& leg_wts = LegQuadRule<Real>::template wts<Order>();
 
             Real len0 = std::min(pow<Real>(0.5,levels), std::min(s, (1-s)));
             Real len1 = std::min<Real>(s, 1-s);
@@ -612,11 +633,19 @@ namespace sctl {
       const Matrix<Real>& Minterp_t = interp_mat[idx*2+1];
       const Long Nnds = wts.Dim();
 
-      Matrix<Real> Xs_(Nnds,COORD_DIM), dXs_(Nnds,COORD_DIM);
+      constexpr Long Nbuff = 10000;
+      StaticArray<Real,Nbuff> buff;
+      Matrix<Real> Xs_, dXs_;
+      if (1*Nnds*COORD_DIM < Nbuff)  Xs_.ReInit(Nnds,COORD_DIM, buff+0*Nnds*COORD_DIM, false);
+      else  Xs_.ReInit(Nnds,COORD_DIM);
+      if (2*Nnds*COORD_DIM < Nbuff) dXs_.ReInit(Nnds,COORD_DIM, buff+1*Nnds*COORD_DIM, false);
+      else dXs_.ReInit(Nnds,COORD_DIM);
       Matrix<Real>::GEMM(Xs_, Minterp_t, Matrix<Real>(Order,COORD_DIM, (Iterator<Real>)Xs.begin(), false));
       Matrix<Real>::GEMM(dXs_, Minterp_t, Matrix<Real>(Order,COORD_DIM, (Iterator<Real>)dXs.begin(), false));
 
-      Matrix<Real> MM(Nnds*KDIM0, KDIM1);
+      Matrix<Real> MM;
+      if (2*Nnds*COORD_DIM + Nnds*KDIM0*KDIM1 < Nbuff) MM.ReInit(Nnds*KDIM0, KDIM1, buff+2*Nnds*COORD_DIM, false);
+      else MM.ReInit(Nnds*KDIM0, KDIM1);
       for (Long i = 0; i < Nnds; i++) {
         using VecType = Vec<Real,1>; // TODO: vectorize
         const VecType r[2] = {-Xs_[i][0], -Xs_[i][1]};
@@ -687,7 +716,9 @@ namespace sctl {
         const Matrix<Real> Mchild1_(Order, KDIM0*KDIM1, Mchild1.begin(), false);
         const Matrix<Real> Mchild2_(Order, KDIM0*KDIM1, Mchild2.begin(), false);
         Matrix<Real> MM_(Order, KDIM0*KDIM1, MM.begin(), false);
-        MM_ = Minterp1 * Mchild1_ + Minterp2 * Mchild2_;
+        //MM_ = Minterp1 * Mchild1_ + Minterp2 * Mchild2_;
+        Matrix<Real>::GEMM(MM_, Minterp1, Mchild1_);
+        Matrix<Real>::GEMM(MM_, Minterp2, Mchild2_, (Real)1);
       };
 
       const Real rel_err = [&MM,&M]() {
@@ -750,7 +781,9 @@ namespace sctl {
         const Matrix<Real> M1_(Order, KDIM0*KDIM1, M1.begin(), false);
         const Matrix<Real> M2_(Order, KDIM0*KDIM1, M2.begin(), false);
         Matrix<Real> M_(Order, KDIM0*KDIM1, M.begin(), false);
-        M_ = Minterp1 * M1_ + Minterp2 * M2_;
+        //M_ = Minterp1 * M1_ + Minterp2 * M2_;
+        Matrix<Real>::GEMM(M_, Minterp1, M1_);
+        Matrix<Real>::GEMM(M_, Minterp2, M2_, (Real)1);
       }
     }
 
@@ -758,6 +791,68 @@ namespace sctl {
     Vector<Real> X_, dX_, Normal_; // Npanel * Order * COORD_DIM
     Vector<Real> SurfWts_; // Npanel * Order
   };
+
+}
+
+//#include SCTL_INCLUDE(vtudata.hpp)
+
+namespace sctl {
+
+  template <class Real, Integer Order> void PanelLst<Real,Order>::GetVTUData(VTUData& vtu_data, const Vector<Real>& F_, const Long elem_idx) const {
+    if (elem_idx == -1) {
+      Long dof = 0, offset = 0;
+      if (F_.Dim()) { // Set dof
+        Long Nnodes = Npanel * Order;
+        dof = F_.Dim() / Nnodes;
+        SCTL_ASSERT(F_.Dim() == Nnodes * dof);
+      }
+      for (Long i = 0; i < Npanel; i++) {
+        const Vector<Real> F(Order*dof, (Iterator<Real>)F_.begin()+offset, false);
+        GetVTUData(vtu_data, F, i);
+        offset += F.Dim();
+      }
+      return;
+    }
+
+    Vector<Real> s_nodes(Order+2);
+    s_nodes[0] = 0;
+    s_nodes[Order+1] = 1;
+    Vector<Real>(Order, s_nodes.begin()+1, false) = PanelNds();
+    s_nodes = PanelNds();
+
+    Vector<Real> X(s_nodes.Dim() * COORD_DIM);
+    Vector<Real> F(F_.Dim()/Order*s_nodes.Dim());
+    { // Set X, F
+      Matrix<Real> M(Order, s_nodes.Dim());
+      Vector<Real> M_(Order*s_nodes.Dim(), M.begin(), false);
+      LagrangeInterp<Real>::Interpolate(M_, PanelNds(), s_nodes);
+
+      const Matrix<Real> Mx_(Order, COORD_DIM, (Iterator<Real>)X_.begin() + elem_idx*Order*COORD_DIM, false);
+      Matrix<Real> Mx(s_nodes.Dim(), COORD_DIM, X.begin(), false);
+      Mx = M.Transpose() * Mx_;
+
+      if (F.Dim()) {
+        const Matrix<Real> Mf_(Order, F_.Dim()/Order, (Iterator<Real>)F_.begin(), false);
+        Matrix<Real> Mf(s_nodes.Dim(), F.Dim()/s_nodes.Dim(), F.begin(), false);
+        Mf = M.Transpose() * Mf_;
+      }
+    }
+
+    Long point_offset = vtu_data.coord.Dim() / 3;
+    for (const auto& f : F) vtu_data.value.PushBack((VTUData::VTKReal)f);
+    for (Long i = 0; i < s_nodes.Dim(); i++) {
+      for (Long k = 0; k < COORD_DIM; k++) vtu_data.coord.PushBack((VTUData::VTKReal)X[i*COORD_DIM+k]);
+      for (Long k = COORD_DIM; k < 3; k++) vtu_data.coord.PushBack(0);
+    }
+    for (Long i = 0; i < s_nodes.Dim(); i++) vtu_data.connect.PushBack(point_offset + i);
+    vtu_data.offset.PushBack(vtu_data.connect.Dim());
+    vtu_data.types.PushBack(4);
+  }
+  template <class Real, Integer Order> void PanelLst<Real,Order>::WriteVTK(const std::string& fname, const Vector<Real>& F, const Comm& comm) const {
+    VTUData vtu_data;
+    GetVTUData(vtu_data, F);
+    vtu_data.WriteVTK(fname, comm);
+  }
 
 }
 

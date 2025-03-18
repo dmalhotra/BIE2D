@@ -6,9 +6,13 @@
 namespace sctl {
 
   template <Integer digits, class Real, Integer N> Vec<Real,N> approx_log(const Vec<Real,N>& x) { // TODO: vectorize
-    Vec<Real,N> logx = Vec<Real,N>::Zero();
-    for (Integer i = 0; i < N; i++) logx.insert(i, (x[i] > 0 ? sctl::log<Real>(x[i]) : 0));
-    return logx;
+    //#if defined(SCTL_HAVE_SVML) || defined(SCTL_HAVE_LIBMVEC)
+    return sctl::select(x==Vec<Real,N>::Zero(), Vec<Real,N>::Zero(), sctl::log(x));
+    //#else
+    //Vec<Real,N> logx = Vec<Real,N>::Zero();
+    //for (Integer i = 0; i < N; i++) logx.insert(i, (x[i] > 0 ? sctl::log<Real>(x[i]) : 0));
+    //return logx;
+    //#endif
   }
   template <Integer digits, class Real, Integer N> Vec<Real,N> approx_inv(const Vec<Real,N>& x) { // TODO: vectorize
     Vec<Real,N> xrsqrt = approx_rsqrt<digits>(x, x > Vec<Real,N>::Zero());

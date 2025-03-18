@@ -32,7 +32,7 @@ namespace sctl {
     LaplaceSL_BIOp.ComputePotential(U0, nu);
 
     Vector<Real> sigma; // unknown density
-    this->SolveBIE(sigma, U0, gmres_tol, gmres_max_iter);
+    this->SolveBIE(sigma, U0, gmres_tol, gmres_max_iter, nullptr);
 
     if (V.Dim() != Ndisc) V.ReInit(Ndisc);
     { // get average of potential

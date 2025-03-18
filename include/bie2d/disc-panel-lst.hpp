@@ -42,6 +42,24 @@ namespace sctl {
      */
     void Init(const Vector<Real>& Xc_, const Real R_, bool adap = false, Real close_threshold = 0.5);
 
+    bool SameRefinement(const DiscPanelLst& p) const {
+      if (panel_cnt.Dim() != p.panel_cnt.Dim()) return false;
+      for (Long i = 0; i < panel_cnt.Dim(); i++) {
+        if (panel_cnt[i] != p.panel_cnt[i]) return false;
+      }
+
+      if (near_lst.Dim() != p.near_lst.Dim()) return false;
+      for (Long i = 0; i < near_lst.Dim(); i++) {
+        if (near_lst[i].disc_idx0 != p.near_lst[i].disc_idx0) return false;
+        if (near_lst[i].disc_idx1 != p.near_lst[i].disc_idx1) return false;
+        if (near_lst[i].panel_idx_range0[0] != p.near_lst[i].panel_idx_range0[0]) return false;
+        if (near_lst[i].panel_idx_range0[1] != p.near_lst[i].panel_idx_range0[1]) return false;
+        if (near_lst[i].panel_idx_range1[0] != p.near_lst[i].panel_idx_range1[0]) return false;
+        if (near_lst[i].panel_idx_range1[1] != p.near_lst[i].panel_idx_range1[1]) return false;
+      }
+      return true;
+    }
+
     /**
      * Return the number of discs.
      */
@@ -96,8 +114,8 @@ namespace sctl {
     Real R;
     Vector<Real> Xc;
 
-    Vector<Real> theta_break_flat;
-    Vector<Vector<Real>> X, Normal, SurfWts__, theta_break;
+    Vector<Real> theta_break_flat; // theta breaks for all discs
+    Vector<Vector<Real>> X, Normal, SurfWts__, theta_break; // disc-wise coord, normal, wts, theta breaks
     Vector<Long> panel_cnt, panel_dsp;
 
     Vector<NearData> near_lst;

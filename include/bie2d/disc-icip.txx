@@ -6,6 +6,7 @@ namespace sctl {
 
   template <class Real, Integer Order> void ICIP<Real,Order>::Init(const Vector<Real>& Xc, const Real radius, const Real tol, const ICIPType icip_type) {
     disc_panels.Init(Xc, radius, (icip_type==ICIPType::Adaptive), d_max);
+    if (this->disc_panels.DiscRadius() <= 0) return; // abort
     icip_type_ = icip_type;
     Kcorrec.ReInit(0);
     Rprecon.ReInit(0);
@@ -234,7 +235,7 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> void ICIP<Real,Order>::GetPrecondBlock(Matrix<Real>* R, Matrix<Real>* Rinv, const Real x0, const Real y0, const Real x1, const Real y1, const Real radius) const {
-    const Real d = sqrt<Real>((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0))/radius - 2;
+    Real d = sqrt<Real>((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0))/radius - 2;
     const Long dof = precomp_R[0].Dim(0) / (8*Order);
     SCTL_ASSERT(precomp_R[0].Dim(0) == 8*Order*dof);
 
@@ -268,14 +269,194 @@ namespace sctl {
     Vector<Real> interp_wts;
     const Real scal = 2/log<Real>(d_min/d_max); // scaling to avoid overflow in barycentric interpolation
     LagrangeInterp<Real>::Interpolate(interp_wts, LogInterpNodes()*scal, Vector<Real>{log<Real>(d)*scal});
+    if (0) { /////////////////////////////// Reinterpolate (for testing)
+      const Real d_max_ = 1.0e-8;
+      const Real d_min_ = 0.9e-6;
+      constexpr Integer Order0 = DISC_INTERP_ORDER;
+      {
+        static int once = 1;
+        if (once) {
+          std::cout<<"Order = "<<Order0<<'\n';
+          once = 0;
+        }
+      }
+      const Vector<QuadReal> interp_nds0 = log<QuadReal>(d_max) + log<QuadReal>(d_min/d_max) * LegQuadRule<QuadReal>::template nds<InterpOrder>();
+      const Vector<QuadReal> interp_nds = log<QuadReal>(d_max_) + log<QuadReal>(d_min_/d_max_) * LegQuadRule<QuadReal>::template nds<Order0>();
+
+      Matrix<QuadReal> M0(InterpOrder, Order0), M1(Order0, 1);
+      Vector<QuadReal> V0(M0.Dim(0)*M0.Dim(1),M0.begin(),false);
+      Vector<QuadReal> V1(M1.Dim(0)*M1.Dim(1),M1.begin(),false);
+      LagrangeInterp<QuadReal>::Interpolate(V0, interp_nds0*scal, interp_nds*scal);
+
+      const QuadReal scal_ = 2/log<QuadReal>(d_min/d_max); // scaling to avoid overflow in barycentric interpolation
+      LagrangeInterp<QuadReal>::Interpolate(V1, interp_nds*scal_, Vector<QuadReal>{log<QuadReal>(d)*scal_});
+
+      interp_wts.ReInit(0);
+      const auto wts = M0*M1;
+      for (const auto x : wts) interp_wts.PushBack((Real)x);
+      //interp_wts = Vector<Real>(InterpOrder, (M0*M1).begin(), false);
+    }
+
+    Matrix<Real> precomp_R_;
+    if (0 && R) { /////////////////////////////// QR approximation
+      auto modified_gram_schmidt = [](Matrix<Real>& Q, Vector<Real>& S, Vector<Long>& pivot, const Matrix<Real>& M_, const Real tol_, const Long max_rows_, const bool verbose) { // orthogonalize rows
+        const Long max_rows = std::min(max_rows_, std::min(M_.Dim(0), M_.Dim(1)));
+        const Real tol = std::max(tol_, machine_eps<Real>());
+        const Long N0 = M_.Dim(0), N1 = M_.Dim(1);
+        if (N0*N1 == 0) return;
+
+        Matrix<Real> M = M_;
+        Vector<Real> row_norm(N0);
+        S.ReInit(max_rows); S.SetZero();
+        pivot.ReInit(max_rows); pivot = -1;
+        Q.ReInit(max_rows, N1); Q.SetZero();
+        for (Long i = 0; i < max_rows; i++) {
+          #pragma omp parallel for schedule(static)
+          for (Long j = 0; j < N0; j++) { // compute row_norm
+            Real row_norm2 = 0;
+            for (Long k = 0; k < N1; k++) {
+              row_norm2 += M[j][k]*M[j][k];
+            }
+            row_norm[j] = sqrt<Real>(row_norm2);
+          }
+
+          Long pivot_idx = 0;
+          Real pivot_norm = 0;
+          for (Long j = 0; j < N0; j++) { // determine pivot
+            if (row_norm[j] > pivot_norm) {
+              pivot_norm = row_norm[j];
+              pivot_idx = j;
+            }
+          }
+
+          //for (Long j = 0; j < i; j++) { // orthonormalize
+          //  Real dot_prod = 0;
+          //  for (Long k = 0; k < N1; k++) dot_prod += M[pivot_idx][k] * Q[j][k];
+          //  for (Long k = 0; k < N1; k++) M[pivot_idx][k] -= Q[j][k] * dot_prod;
+          //}
+          //pivot_norm = 0;
+          //for (Long k = 0; k < N1; k++) pivot_norm += M[pivot_idx][k] * M[pivot_idx][k];
+          //pivot_norm = sqrt<Real>(pivot_norm);
+
+          pivot[i] = pivot_idx;
+          S[i] = pivot_norm;
+
+          #pragma omp parallel for schedule(static)
+          for (Long k = 0; k < N1; k++) Q[i][k] = M[pivot_idx][k] / pivot_norm;
+
+          #pragma omp parallel for schedule(static)
+          for (Long j = 0; j < N0; j++) { // orthonormalize
+            Real dot_prod = 0;
+            for (Long k = 0; k < N1; k++) dot_prod += M[j][k] * Q[i][k];
+            for (Long k = 0; k < N1; k++) M[j][k] -= Q[i][k] * dot_prod;
+          }
+
+          if (verbose) std::cout<<pivot_norm/S[0]<<'\n';
+          if (pivot_norm/S[0] < tol) {
+            pivot[i] = -1;
+            S[i] = 0;
+            if (verbose) std::cout<<"rank = "<<i<<'\n';
+            break;
+          }
+        }
+      };
+      auto approx_SVD = [&modified_gram_schmidt](Matrix<Real>& U, Matrix<Real>& S, Matrix<Real>& Vt, const Matrix<Real>& M, const Real tol, const Long N){
+        Vector<Real> S_;
+        Matrix<Real> Q_;
+        Vector<Long> pivot;
+        modified_gram_schmidt(Q_, S_, pivot, M, tol*0.1, (Long)(N*1.1), false);
+
+        Long k = 0;
+        while (k < S_.Dim() && S_[k] > 0) k++;
+        modified_gram_schmidt(Q_, S_, pivot, Matrix<Real>(k, Q_.Dim(1), Q_.begin()), 0, k, false);
+        Matrix<Real> Q(k, Q_.Dim(1), Q_.begin(), false);
+
+        Matrix<Real> R(M.Dim(0), k);
+        Matrix<Real>::GEMM(R, M, Q.Transpose());
+
+        R.SVD(U, S, Vt);
+        Vt = Vt * Q;
+      };
+      auto modified_gram_schmidt_ = [&approx_SVD](Matrix<Real>& Q, Vector<Real>& S_, Vector<Long>& pivot, const Matrix<Real>& M_, const Real tol_, const Long max_rows_, const bool verbose) { // orthogonalize rows
+        //Matrix<Real> U, S, Vt, M=M_;
+        //approx_SVD(U, S, Vt, M, tol_, max_rows_);
+        //Q=Vt;
+
+        //const Long max_rows = std::min(max_rows_, std::min(M_.Dim(0), M_.Dim(1)));
+        //Matrix<Real> A(max_rows, M_.Dim(0));
+        //#pragma omp parallel for schedule(static)
+        //for (Long i = 0; i < A.Dim(0)*A.Dim(1); i++) A[0][i] = drand48();
+
+        auto A = M_;
+        Matrix<Real> U, S, Vt;
+        A.SVD(U,S,Vt);
+
+        { // Truncate Vt
+          Long rank = 0;
+          Real max_S = 0;
+          for (Long i = 0; i < S.Dim(0); i++) max_S = std::max<Real>(max_S, fabs(S[i][i]));
+          SCTL_ASSERT(S.Dim(0) == S.Dim(1) && S.Dim(1) == Vt.Dim(0));
+          for (Long i = 0; i < S.Dim(0); i++) {
+            if (fabs(S[i][i]) < max_S * tol_) {
+              for (Long j = 0; j < Vt.Dim(1); j++) {
+                Vt[i][j] = 0;
+              }
+            } else {
+              rank++;
+              std::cout<<S[i][i]<<'\n';
+            }
+          }
+          std::cout<<"Rank = "<<rank<<'\n';
+        }
+
+        Q=Vt;
+      };
+
+      SCTL_ASSERT(precomp_R[0].Dim(0)==precomp_R[0].Dim(1));
+      const Long N = precomp_R[0].Dim(0);
+      Matrix<Real> M(N*N, InterpOrder);
+      static const Vector<Real> interp_wts = LegQuadRule<Real>::template wts<InterpOrder>();
+      for (Long i = 0; i < InterpOrder; i++) {
+        const Real scal = exp<Real>(LogInterpNodes()[i]);// * sqrt<Real>(interp_wts[i]);
+        for (Long j = 0; j < N*N; j++) {
+          M[j][i] = precomp_R[i][0][j] * scal;
+        }
+      }
+      M.Write("M.mat");
+
+      Matrix<Real> Q;
+      Vector<Real> S;
+      Vector<Long> pivot;
+      modified_gram_schmidt_(Q, S, pivot, M, 1e-14, InterpOrder*0+64, true);
+      precomp_R_ = (M*Q.Transpose()) * Q;
+      const auto Merr = precomp_R_ - M;
+      Real max_err = 0, max_val = 0;
+      for (const auto x : Merr) max_err = std::max<Real>(max_err, fabs(x));
+      for (const auto x : M   ) max_val = std::max<Real>(max_val, fabs(x));
+      std::cout<<max_err<<" / "<<max_val<<"\n";
+    }
+
     if (R) {
       const Long N0 = precomp_R[0].Dim(0), N1 = precomp_R[0].Dim(1);
       if (R->Dim(0) != N0 || R->Dim(1) != N1) R->ReInit(N0, N1);
-      #pragma omp parallel for schedule(static)
-      for (Long j = 0; j < N0*N1; j++) {
-        (*R)[0][j] = interp_wts[0] * precomp_R[0][0][j];
-        for (Long i = 1; i < InterpOrder; i++) (*R)[0][j] += interp_wts[i] * precomp_R[i][0][j];
+      #pragma omp parallel
+      {
+        const Integer np = omp_get_num_threads();
+        const Integer pid = omp_get_thread_num();
+        const Long a = N0*N1*(pid+0)/np;
+        const Long b = N0*N1*(pid+1)/np;
+        for (Long j = a; j < b; j++) {
+          (*R)[0][j] = interp_wts[0] * precomp_R[0][0][j] * exp<Real>(LogInterpNodes()[0]);
+          //(*R)[0][j] = interp_wts[0] * precomp_R_[j][0];
+        }
+        for (Long i = 1; i < InterpOrder; i++) {
+          for (Long j = a; j < b; j++) {
+            (*R)[0][j] += interp_wts[i] * precomp_R[i][0][j] * exp<Real>(LogInterpNodes()[i]);
+            //(*R)[0][j] += interp_wts[i] * precomp_R_[j][i];
+          }
+        }
       }
+      (*R) /= d;
       SCTL_ASSERT(N0 == N1);
       for (Long i = 0; i < N0; i++) (*R)[i][i] -= 1; // subtract identity, added back in ApplyPrecond()
       if (dof == COORD_DIM) apply_rotation(*R);
@@ -283,10 +464,20 @@ namespace sctl {
     if (Rinv) {
       const Long N0 = precomp_Rinv[0].Dim(0), N1 = precomp_Rinv[0].Dim(1);
       if (Rinv->Dim(0) != N0 || Rinv->Dim(1) != N1) Rinv->ReInit(N0, N1);
-      #pragma omp parallel for schedule(static)
-      for (Long j = 0; j < N0*N1; j++) {
-        (*Rinv)[0][j] = interp_wts[0] * precomp_Rinv[0][0][j];
-        for (Long i = 1; i < InterpOrder; i++) (*Rinv)[0][j] += interp_wts[i] * precomp_Rinv[i][0][j];
+      #pragma omp parallel
+      {
+        const Integer np = omp_get_num_threads();
+        const Integer pid = omp_get_thread_num();
+        const Long a = N0*N1*(pid+0)/np;
+        const Long b = N0*N1*(pid+1)/np;
+        for (Long j = a; j < b; j++) {
+          (*Rinv)[0][j] = interp_wts[0] * precomp_Rinv[0][0][j];
+        }
+        for (Long i = 1; i < InterpOrder; i++) {
+          for (Long j = a; j < b; j++) {
+            (*Rinv)[0][j] += interp_wts[i] * precomp_Rinv[i][0][j];
+          }
+        }
       }
       if (dof == COORD_DIM) apply_rotation(*Rinv);
     }
@@ -348,8 +539,12 @@ namespace sctl {
     const auto& near_lst = this->disc_panels.GetNearList();
     if (icip_type_ == ICIPType::Precond && near_lst.Dim() > 0) {
       Setup();
+
       Vector<Real> R_sigma;
       ApplyPrecond(&R_sigma, sigma);
+
+      // TODO: determine why precond is less accurate?
+
       this->ApplyBIOpDirect(U, R_sigma);
       { // U -= R_sigma_far // TODO: optimize
         Vector<Real> R_sigma_far, R_sigma_far_;
@@ -358,6 +553,11 @@ namespace sctl {
         (*U) -= R_sigma_far_;
       }
       (*U) += sigma;
+
+      //Vector<Real> Ucorrec(N);
+      //this->ApplyMatrixBlocks(Ucorrec, R_sigma, this->disc_panels, this->disc_panels.GetNearList(), Kcorrec);
+      //this->ApplyBIOpDirect(U, R_sigma);
+      //(*U) += Ucorrec;
 
     } else if (icip_type_ == ICIPType::Compress && near_lst.Dim() > 0) {
       Setup();
@@ -385,11 +585,11 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> const Vector<Real>& ICIP<Real,Order>::LogInterpNodes() {
-    static const Vector<Real> interp_nds = log<Real>(d_max) + log<Real>(d_min/d_max) * LegQuadRule<Real>::ComputeNds(InterpOrder);
+    static const Vector<Real> interp_nds = log<Real>(d_max) + log<Real>(d_min/d_max) * LegQuadRule<Real>::template nds<InterpOrder>();
     return interp_nds;
   }
 
-  template <class Real, Integer Order> void ICIP<Real,Order>::SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter) const {
+  template <class Real, Integer Order> void ICIP<Real,Order>::SolveBIE(Vector<Real>& sigma, const Vector<Real>& rhs, const Real gmres_tol, const Long gmres_max_iter, KrylovPrecond<Real>* precond) const {
     const Long N = rhs.Dim();
     Vector<Real> rhs_ = rhs;
     SqrtScaling(rhs_);
@@ -409,21 +609,75 @@ namespace sctl {
           x.SetZero(); x[i] = 1;
           Vector<Real> U(N, M[i], false); U = 0;
           BIOp(&U, x);
-          //std::cout<<i<<' '<<N<<'\n';
+          std::cout<<i<<' '<<N<<'\n';
         }
-        //std::string fname = std::string("M_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ? "compress" : "precond") + ".mat";
-        //if (std::is_same<Real,QuadReal>::value) M.Write(fname.c_str());
+        std::string fname = std::string("M_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ? "compress" : "precond") + ".mat";
+        if (std::is_same<Real,QuadReal>::value || 1) M.Write(fname.c_str());
       }
 
       Matrix<Real> MM = Matrix<Real>(M).pinv(machine_eps<Real>());
-      //std::string fname = std::string("Minv_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ? "compress" : "precond") + ".mat";
-      //if (std::is_same<Real,QuadReal>::value) MM.Write(fname.c_str());
+      std::string fname = std::string("Minv_") + (this->icip_type_==ICIPType::Adaptive ? "adaptive" : this->icip_type_==ICIPType::Compress ? "compress" : "precond") + ".mat";
+      if (std::is_same<Real,QuadReal>::value || 1) MM.Write(fname.c_str());
 
       const Matrix<Real> rhs__(1, rhs_.Dim(), rhs_.begin());
       Matrix<Real> sigma = rhs__ * MM;
       sigma_ = Vector<Real>(sigma.Dim(1), sigma.begin(), false);
     } else {
-      solver(&sigma_, BIOp, rhs_, gmres_tol, gmres_max_iter);
+      const bool prof_state = Profile::Enable(false);
+      Profile::Tic("Setup");
+      Real precond_l2_err = 0, precond_linf_err = 0;
+      if (precond && precond->Size() == rhs_.Dim() && precond->Rank() > 0) {
+        Vector<Real> err;
+        BIOp(&err, rhs_);
+        (*precond).Apply(err);
+        err -= rhs_;
+        const auto norm2 = [](const Vector<Real>& v){
+          Real sum = 0;
+          for (const auto& x : v) sum += x * x;
+          return sqrt<Real>(sum);
+        };
+        const auto norm_inf = [](const Vector<Real>& v){
+          Real max_val = 0;
+          for (const auto& x : v) max_val = std::max<Real>(max_val, fabs(x));
+          return max_val;
+        };
+        precond_l2_err = norm2(err)/norm2(rhs_);
+        precond_linf_err = norm_inf(err)/norm_inf(rhs_);
+      }
+      Profile::Toc();
+
+      Profile::Tic("Solve");
+      Long gmres_iter;
+      Real min_dist = [this](){ // Set min_dist
+        Real min_d = disc_panels.DiscRadius();
+        const Long Ndisc = disc_panels.DiscCount();
+        for (Long i = 0; i < Ndisc; i++) {
+          for (Long j = 0; j < Ndisc; j++) {
+            if (i == j) continue;
+            Real x0, x1, y0, y1;
+            std::tie(x0,y0) = disc_panels.DiscCoord(i);
+            std::tie(x1,y1) = disc_panels.DiscCoord(j);
+            const Real d = sqrt<Real>( (x0-x1)*(x0-x1) + (y0-y1)*(y0-y1) ) - 2*disc_panels.DiscRadius();
+            min_d = std::min<Real>(min_d, d);
+          }
+        }
+        return min_d;
+      }();
+      solver(&sigma_, BIOp, rhs_, gmres_tol, gmres_max_iter, false, &gmres_iter, precond);
+      Profile::Toc();
+
+      if (precond && precond_l2_err > 1e3) (*precond) = KrylovPrecond<Real>(); /////////////////////////////////
+      std::cout<<"GMRES iterations = "<<gmres_iter<<",    Krylov-precond rank = "<<(precond?precond->Rank()-gmres_iter:0)<<",    precond-l2-err = "<<precond_l2_err<<",    precond-linf-err = "<<precond_linf_err<<",    min-dist = "<<min_dist<<'\n';
+      //if (gmres_iter > gmres_max_iter-10) {
+      //  disc_panels.WriteVTK("vis-dbg");
+      //  exit(0);
+      //}
+      Profile::print();
+      Profile::reset();
+      Profile::Enable(prof_state);
+      //static long counter = 0;
+      //counter++;
+      //if (counter == 5) exit(0);
     }
 
     InvSqrtScaling(sigma_);

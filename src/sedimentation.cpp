@@ -5,7 +5,7 @@ using namespace sctl;
 
 constexpr Integer ElemOrder = 24;
 constexpr Integer COORD_DIM = 2;
-using Real = double;
+using Real = double; //QuadReal;
 
 std::mt19937 rng;
 
@@ -45,8 +45,8 @@ Vector<Real> init_lattice(const Long Ndisc, const Real R, const Real eps)
         Long first = 3*layer*(layer-1) + 1;
         Long side  = (Long)std::floor((i-first)/layer);
         Long idx  = (i-first) % layer;
-        X[i*COORD_DIM+0] =  layer*std::cos((side-1)*const_pi<Real>()/3) + (idx+1)*std::cos((side+1)*const_pi<Real>()/3);
-        X[i*COORD_DIM+1] = -layer*std::sin((side-1)*const_pi<Real>()/3) - (idx+1)*std::sin((side+1)*const_pi<Real>()/3);
+        X[i*COORD_DIM+0] =  layer*cos<Real>((side-1)*const_pi<Real>()/3) + (idx+1)*cos<Real>((side+1)*const_pi<Real>()/3);
+        X[i*COORD_DIM+1] = -layer*sin<Real>((side-1)*const_pi<Real>()/3) - (idx+1)*sin<Real>((side+1)*const_pi<Real>()/3);
     }
 
     // Rescale
@@ -152,7 +152,8 @@ int main(int argc, char** argv)
     //     }
     // }
     //F[0] = 1;
-    F[1] = 1;
+    //F[1] = 1;
+    F[2] = 1;
 
     for (const auto& x : X) {
         std::cout << std::setprecision(16) << x << ' ';
@@ -174,6 +175,59 @@ int main(int argc, char** argv)
 
         disc_mobility.Init(X, R, tol, icip_type);
         disc_mobility.Solve(V, F, Vector<Real>(), gmres_tol, gmres_iter);
+
+        if (0) { // Build mobility matrix
+          const Long N = Ndisc*3;
+          Matrix<Real> M(N, N);
+          for (Long j0 = 0; j0 < Ndisc; j0++) {
+            for (Long j1 = 0; j1 < 3; j1++) {
+              Vector<Real> V(N), F(N);
+              F = 0;
+              V = 0;
+              F[j0*3+j1] = 1;
+              disc_mobility.Solve(V, F, Vector<Real>(), gmres_tol, gmres_iter);
+              for (Long k0 = 0; k0 < Ndisc; k0++)
+                for (Long k1 = 0; k1 < 3; k1++)
+                  M[j1*Ndisc+j0][k1*Ndisc+k0] = V[k0*3+k1];
+            }
+          }
+          std::cout<<M<<'\n';
+          M.Write("mobil.mat");
+        }
+
+        if (0) { // estimate error
+          Vector<Vector<Real>> VV(3);
+          disc_mobility.Init(X, R, tol, ICIPType::Adaptive);
+          disc_mobility.Solve(VV[0], F, Vector<Real>(), gmres_tol, gmres_iter);
+
+          disc_mobility.Init(X, R, tol, ICIPType::Compress);
+          disc_mobility.Solve(VV[1], F, Vector<Real>(), gmres_tol, gmres_iter);
+
+          disc_mobility.Init(X, R, tol, ICIPType::Precond);
+          disc_mobility.Solve(VV[2], F, Vector<Real>(), gmres_tol, gmres_iter);
+
+          for (const auto& v : VV) {
+            for (const auto& x : v) {
+              std::cout<<std::setprecision(16)<<x<<' ';
+            }
+            std::cout<<'\n';
+          }
+          std::cout<<'\n';
+
+          Real max_val = 0;
+          for (const auto& v : VV) for (const auto& x : v) max_val = std::max(max_val, fabs(x));
+          for (Integer i = 0; i < VV.Dim(); i++) {
+            for (Integer j = 0; j < VV.Dim(); j++) {
+              Real err = 0;
+              if (VV[i].Dim() == VV[j].Dim()) {
+                for (const auto x : VV[i]-VV[j]) err = std::max(err, fabs(x));
+              }
+              std::cout<<std::setprecision(4)<<err/max_val<<' ';
+            }
+            std::cout<<'\n';
+          }
+          std::cout<<'\n';
+        }
 
         for (Long j = 0; j < Ndisc; j++) {
             X[j*COORD_DIM+0] += V[j*3+0] * dt;
