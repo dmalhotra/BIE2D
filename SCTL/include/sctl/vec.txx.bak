@@ -1,0 +1,120 @@
+
+namespace SCTL_NAMESPACE {
+
+  template <class ScalarType> constexpr Integer DefaultVecLen() {
+    #if defined(__AVX512__) || defined(__AVX512F__)
+    static_assert(SCTL_ALIGN_BYTES >= 64, "Insufficient memory alignment for SIMD vector types");
+    return 64/sizeof(ScalarType);
+    #elif defined(__AVX__)
+    static_assert(SCTL_ALIGN_BYTES >= 32, "Insufficient memory alignment for SIMD vector types");
+    return 32/sizeof(ScalarType);
+    #elif defined(__SSE4_2__)
+    static_assert(SCTL_ALIGN_BYTES >= 16, "Insufficient memory alignment for SIMD vector types");
+    return 16/sizeof(ScalarType);
+    #else
+    static_assert(SCTL_ALIGN_BYTES >= 8, "Insufficient memory alignment for SIMD vector types");
+    return 1;
+    #endif
+  }
+
+  template <class ValueType, Integer N> constexpr Integer Vec<ValueType,N>::Size() {
+    return N;
+  }
+
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::Zero() {
+    Vec<ValueType,N> r;
+    r.v = zero_intrin<VData>();
+    return r;
+  }
+
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::Load1(ScalarType const* p) {
+    Vec<ValueType,N> r;
+    r.v = load1_intrin<VData>(p);
+    return r;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::Load(ScalarType const* p) {
+    Vec<ValueType,N> r;
+    r.v = loadu_intrin<VData>(p);
+    return r;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::LoadAligned(ScalarType const* p) {
+    Vec<ValueType,N> r;
+    r.v = load_intrin<VData>(p);
+    return r;
+  }
+
+  template <class ValueType, Integer N> inline Vec<ValueType,N>::Vec(const VData& v_) : v(v_) {}
+  template <class ValueType, Integer N> inline Vec<ValueType,N>::Vec(const ScalarType& a) : Vec(set1_intrin<VData>(a)) {}
+  template <class ValueType, Integer N> template <class T,class ...T1> inline Vec<ValueType,N>::Vec(T x, T1... args) : Vec(InitVec<T1...>::template apply<ScalarType>((ScalarType)x,args...)) {}
+
+
+  template <class ValueType, Integer N> inline void Vec<ValueType,N>::Store(ScalarType* p) const {
+    storeu_intrin(p,v);
+  }
+  template <class ValueType, Integer N> inline void Vec<ValueType,N>::StoreAligned(ScalarType* p) const {
+    store_intrin(p,v);
+  }
+
+  template <class ValueType, Integer N> inline typename Vec<ValueType,N>::ScalarType Vec<ValueType,N>::operator[](Integer i) const {
+    return extract_intrin(v,i);
+  }
+  template <class ValueType, Integer N> inline void Vec<ValueType,N>::insert(Integer i, ScalarType value) {
+    insert_intrin(v,i,value);
+  }
+
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::operator+() const {
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::operator-() const {
+    return unary_minus_intrin(v); // Zero() - (*this);
+  }
+
+  template <class ValueType, Integer N> inline Vec<ValueType,N> Vec<ValueType,N>::operator~() const {
+    return not_intrin(v);
+  }
+
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator= (const ValueType& a) {
+    v = set1_intrin<VData>(a);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator*=(const Vec<ValueType,N>& rhs) {
+    v = mul_intrin(v, rhs.v);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator/=(const Vec<ValueType,N>& rhs) {
+    v = div_intrin(v, rhs.v);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator+=(const Vec<ValueType,N>& rhs) {
+    v = add_intrin(v, rhs.v);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator-=(const Vec<ValueType,N>& rhs) {
+    v = sub_intrin(v, rhs.v);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator&=(const Vec<ValueType,N>& rhs) {
+    v = and_intrin(v, rhs.v);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator^=(const Vec<ValueType,N>& rhs) {
+    v = xor_intrin(v, rhs.v);
+    return *this;
+  }
+  template <class ValueType, Integer N> inline Vec<ValueType,N>& Vec<ValueType,N>::operator|=(const Vec<ValueType,N>& rhs) {
+    v = or_intrin(v, rhs.v);
+    return *this;
+  }
+
+  template <class ValueType, Integer N> template <class T, class... T2> struct Vec<ValueType,N>::InitVec {
+    template <class... T1> static inline VData apply(T1... start, T x, T2... rest) {
+      return InitVec<T2...>::template apply<ScalarType, T1...>(start..., (ScalarType)x, rest...);
+    }
+  };
+  template <class ValueType, Integer N> template <class T> struct Vec<ValueType,N>::InitVec<T> {
+    template <class... T1> static inline VData apply(T1... start, T x) {
+      return set_intrin<VData>(start..., (ScalarType)x);
+    }
+  };
+
+}
