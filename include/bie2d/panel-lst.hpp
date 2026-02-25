@@ -102,6 +102,7 @@ namespace sctl {
     }
 
     template <class KerFn, Integer digits> void LayerPotentialMatrix(Matrix<Real>& M, const Vector<Real>& Xt, const Real tol, const Long panel_start = 0, const Long panel_end = -1) const {
+      constexpr Integer VecLen = DefaultVecLen<Real>();
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
@@ -120,18 +121,21 @@ namespace sctl {
       for (Long t = 0; t < Nt; t++) {
         for (Long i = panel_start; i < panel_end_; i++) {
           const Tensor<Real,false,COORD_DIM> Xt_((Iterator<Real>)Xt.begin()+t*COORD_DIM);
-          Tensor<Real,true,Order,COORD_DIM> XX;
-          for (Long j = 0; j < Order; j++) { // Set XX
-            for (Integer k = 0; k < COORD_DIM; k++) {
-              XX(j,k) = X_[(i*Order+j)*COORD_DIM+k] - Xt_(k);
+          alignas(sizeof(Real) * VecLen) Tensor<Real,true,COORD_DIM,Order> XX;
+          for (Integer k = 0; k < COORD_DIM; k++) { // Set XX
+            for (Long j = 0; j < Order; j++) {
+              XX(k,j) = X_[(i*Order+j)*COORD_DIM+k] - Xt_(k);
             }
           }
 
-          Tensor<Real,true,Order*KDIM0,KDIM1> MM;
+          alignas(sizeof(Real) * VecLen) Tensor<Real,true,KDIM0,KDIM1,Order> MM;
           PanelKernelMatAdap<KerFn,digits>(MM, XX, tol);
-          for (Long j = 0; j < Order*KDIM0; j++) {
-            for (Long k = 0; k < KDIM1; k++) {
-              M[(i-panel_start)*Order*KDIM0+j][t*KDIM1+k] = MM(j, k);
+
+          for (Long j = 0; j < Order; j++) {
+            for (Long k0 = 0; k0 < KDIM0; k0++) {
+              for (Long k1 = 0; k1 < KDIM1; k1++) {
+                M[(i-panel_start)*Order*KDIM0+j*KDIM0+k0][t*KDIM1+k1] = MM(k0,k1,j);
+              }
             }
           }
         }
@@ -360,6 +364,10 @@ namespace sctl {
       return M;
     }
 
+    /**
+     * \param[out] dY the output derivative values at the surface node points in array-of-struct order.
+     * \param[in] Y the input function values at the surface node points in array-of-struct order.
+     */
     static void ComputeDerivative(Vector<Real>& dY, const Vector<Real>& Y) {
       const auto DerivMat = []() {
         Vector<Real> V(Order); V = 0;
@@ -383,58 +391,98 @@ namespace sctl {
       Matrix<Real>::GEMM(dY_, Mt, Y_);
     }
 
+    /**
+     * \param[out] dY the output derivative values at the surface node points in struct-of-array order.
+     * \param[in] Y the input function values at the surface node points in struct-of-array order.
+     */
+    static void ComputeDerivativeSoA(Vector<Real>& dY, const Vector<Real>& Y) {
+      const auto DerivMat = []() {
+        Vector<Real> V(Order); V = 0;
+        Matrix<Real> M(Order, Order); M = 0;
+        for (Long i = 0; i < Order; i++) {
+          V[i] = 1;
+          Vector<Real> dV(Order, M[i], false);
+          LagrangeInterp<Real>::Derivative(dV, V, PanelNds());
+          V[i] = 0;
+        }
+        return M;
+      };
+      static const Matrix<Real> Mt = DerivMat();
+
+      const Long dof = Y.Dim() / Order;
+      SCTL_ASSERT(Y.Dim() == dof * Order);
+      if (dY.Dim() !=dof *  Order) dY.ReInit(dof * Order);
+
+      const Matrix<Real> Y_(dof, Order, (Iterator<Real>)Y.begin(), false);
+      Matrix<Real> dY_(dof, Order, dY.begin(), false);
+      Matrix<Real>::GEMM(dY_, Y_, Mt);
+    }
+
     template <class KerFn, Integer digits, class Mat, class CoordVec> static void PanelKernelMat(Mat& M, const CoordVec& Xs) { // assume Xt = 0
+      constexpr Integer VecLen = DefaultVecLen<Real>();
+      static_assert(Order % VecLen == 0, "Vectorization not supported for the given order.");
+      using VecType = Vec<Real,VecLen>;
+
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
-      static_assert(Mat::template Dim<0>() == Order * KDIM0, "Output matrix dimension mismatch");
+      static_assert(Mat::template Dim<0>() == KDIM0, "Output matrix dimension mismatch");
       static_assert(Mat::template Dim<1>() == KDIM1, "Output matrix dimension mismatch");
+      static_assert(Mat::template Dim<2>() == Order, "Output matrix dimension mismatch");
       static_assert(DIM == COORD_DIM, "Coordinate dimension mismatch.");
 
-      static_assert(CoordVec::template Dim<0>() == Order, "Coordinate vector dimension mismatch");
-      static_assert(CoordVec::template Dim<1>() == COORD_DIM, "Coordinate vector dimension mismatch");
+      static_assert(CoordVec::template Dim<0>() == COORD_DIM, "Coordinate vector dimension mismatch");
+      static_assert(CoordVec::template Dim<1>() == Order, "Coordinate vector dimension mismatch");
+      static const auto& PanelWtsVec = PanelWts();
 
-      Tensor<Real,true,Order,2> dXs;
+      alignas(sizeof(Real) * VecLen) Tensor<Real,true,COORD_DIM,Order> dXs;
       { // Set dXs
-        Vector<Real> dX(Order*COORD_DIM, dXs.begin(), false);
-        const Vector<Real> X(Order*COORD_DIM, (Iterator<Real>)Xs.begin(), false);
-        ComputeDerivative(dX, X);
+        Vector<Real> dX(COORD_DIM*Order, dXs.begin(), false);
+        const Vector<Real> X(COORD_DIM*Order, (Iterator<Real>)Xs.begin(), false);
+        ComputeDerivativeSoA(dX, X);
       }
 
-      for (Long i = 0; i < Order; i++) {
-        using VecType = Vec<Real,1>; // TODO: vectorize
-        const VecType r[2] = {-Xs(i,0), -Xs(i,1)};
-        const Real dx[2] = {dXs(i,0), dXs(i,1)};
-        const Real da = sqrt<Real>(dx[0]*dx[0] + dx[1]*dx[1]);
-        const Real da_inv = 1/da;
+      for (Long i = 0; i < Order; i+=VecLen) {
+        const VecType r[2] = {-VecType::LoadAligned(&Xs(0,i)), -VecType::LoadAligned(&Xs(1,i))};
+        const VecType dx[2] = {VecType::LoadAligned(&dXs(0,i)), VecType::LoadAligned(&dXs(1,i))};
+
+        const VecType da2 = dx[0]*dx[0] + dx[1]*dx[1];
+        const VecType da_inv = approx_rsqrt<digits>(da2);
         const VecType n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
 
         VecType M_[KDIM0][KDIM1];
         KerFn::template uKerMatrix<digits>(M_, r, n, nullptr);
+
+        const VecType quad_wts = VecType::LoadAligned(&PanelWtsVec[0] + i) * (da2 * da_inv) * KerFn::template uKerScaleFactor<Real>();
         for (Long k0 = 0; k0 < KDIM0; k0++) {
           for (Long k1 = 0; k1 < KDIM1; k1++) {
-            M(i*KDIM0+k0, k1) = M_[k0][k1][0] * da * PanelWts()[i] * KerFn::template uKerScaleFactor<Real>();
+            (M_[k0][k1] * quad_wts).StoreAligned(&M(k0,k1,i));
           }
         }
       }
     }
 
     template <class KerFn, Integer digits, class Mat, class CoordVec> static void PanelKernelMatSing(Mat& M, const CoordVec& Xs, const Integer idx, const Real tol) { // assume Xt = 0
+      constexpr Integer VecLen = DefaultVecLen<Real>();
+      static_assert(Order % VecLen == 0, "Vectorization not supported for the given order.");
+      using VecType = Vec<Real,VecLen>;
+
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
-      static_assert(Mat::template Dim<0>() == Order * KDIM0, "Output matrix dimension mismatch");
+      static_assert(Mat::template Dim<0>() == KDIM0, "Output matrix dimension mismatch");
       static_assert(Mat::template Dim<1>() == KDIM1, "Output matrix dimension mismatch");
+      static_assert(Mat::template Dim<2>() == Order, "Output matrix dimension mismatch");
       static_assert(DIM == COORD_DIM, "Coordinate dimension mismatch.");
 
-      static_assert(CoordVec::template Dim<0>() == Order, "Coordinate vector dimension mismatch");
-      static_assert(CoordVec::template Dim<1>() == COORD_DIM, "Coordinate vector dimension mismatch");
+      static_assert(CoordVec::template Dim<0>() == COORD_DIM, "Coordinate vector dimension mismatch");
+      static_assert(CoordVec::template Dim<1>() == Order, "Coordinate vector dimension mismatch");
 
-      Tensor<Real,true,Order,2> dXs;
+      alignas(sizeof(Real) * VecLen) Tensor<Real,true,COORD_DIM,Order> dXs;
       { // Set dXs
-        Vector<Real> dX(Order*COORD_DIM, dXs.begin(), false);
-        const Vector<Real> X(Order*COORD_DIM, (Iterator<Real>)Xs.begin(), false);
-        ComputeDerivative(dX, X);
+        Vector<Real> dX(COORD_DIM*Order, dXs.begin(), false);
+        const Vector<Real> X(COORD_DIM*Order, (Iterator<Real>)Xs.begin(), false);
+        ComputeDerivativeSoA(dX, X);
       }
 
       static const Vector<Vector<Real>> nds_wts = []() {
@@ -615,6 +663,13 @@ namespace sctl {
           auto& nds = nds_wts[2*i+0];
           auto& wts = nds_wts[2*i+1];
           DyadicQuad(nds, wts, LegQuadOrder, PanelNds()[i], RefLevels, false);
+
+          const Long pad_len = VecLen - nds.Dim() % VecLen;
+          for (Long j = 0; j < pad_len; j++) { // pad to multiple of VecLen for vectorization
+            nds.PushBack(nds[0]);
+            wts.PushBack(0);
+          }
+          SCTL_ASSERT(nds.Dim() % VecLen == 0);
         }
         return nds_wts;
       }();
@@ -634,49 +689,53 @@ namespace sctl {
       const Long Nnds = wts.Dim();
 
       constexpr Long Nbuff = 10000;
-      StaticArray<Real,Nbuff> buff;
+      alignas(sizeof(Real) * VecLen) StaticArray<Real,Nbuff> buff;
       Matrix<Real> Xs_, dXs_;
-      if (1*Nnds*COORD_DIM < Nbuff)  Xs_.ReInit(Nnds,COORD_DIM, buff+0*Nnds*COORD_DIM, false);
-      else  Xs_.ReInit(Nnds,COORD_DIM);
-      if (2*Nnds*COORD_DIM < Nbuff) dXs_.ReInit(Nnds,COORD_DIM, buff+1*Nnds*COORD_DIM, false);
-      else dXs_.ReInit(Nnds,COORD_DIM);
-      Matrix<Real>::GEMM(Xs_, Minterp_t, Matrix<Real>(Order,COORD_DIM, (Iterator<Real>)Xs.begin(), false));
-      Matrix<Real>::GEMM(dXs_, Minterp_t, Matrix<Real>(Order,COORD_DIM, (Iterator<Real>)dXs.begin(), false));
+      if (1*COORD_DIM*Nnds < Nbuff)  Xs_.ReInit(COORD_DIM,Nnds, buff+0*COORD_DIM*Nnds, false);
+      else  Xs_.ReInit(COORD_DIM,Nnds);
+      if (2*COORD_DIM*Nnds < Nbuff) dXs_.ReInit(COORD_DIM,Nnds, buff+1*COORD_DIM*Nnds, false);
+      else dXs_.ReInit(COORD_DIM,Nnds);
+      Matrix<Real>::GEMM(Xs_, Matrix<Real>(COORD_DIM,Order, (Iterator<Real>)Xs.begin(), false), Minterp);
+      Matrix<Real>::GEMM(dXs_, Matrix<Real>(COORD_DIM,Order, (Iterator<Real>)dXs.begin(), false), Minterp);
 
       Matrix<Real> MM;
-      if (2*Nnds*COORD_DIM + Nnds*KDIM0*KDIM1 < Nbuff) MM.ReInit(Nnds*KDIM0, KDIM1, buff+2*Nnds*COORD_DIM, false);
-      else MM.ReInit(Nnds*KDIM0, KDIM1);
-      for (Long i = 0; i < Nnds; i++) {
-        using VecType = Vec<Real,1>; // TODO: vectorize
-        const VecType r[2] = {-Xs_[i][0], -Xs_[i][1]};
-        const Real dx[2] = {dXs_[i][0], dXs_[i][1]};
-        const Real da = sqrt<Real>(dx[0]*dx[0] + dx[1]*dx[1]);
-        const Real da_inv = 1/da;
+      if (2*COORD_DIM*Nnds + KDIM0*KDIM1*Nnds < Nbuff) MM.ReInit(KDIM0*KDIM1, Nnds, buff+2*COORD_DIM*Nnds, false);
+      else MM.ReInit(KDIM0*KDIM1, Nnds);
+      for (Long i = 0; i < Nnds; i+=VecLen) {
+        const VecType r[2] = {-VecType::LoadAligned(&Xs_[0][i]), -VecType::LoadAligned(&Xs_[1][i])};
+        const VecType dx[2] = {VecType::LoadAligned(&dXs_[0][i]), VecType::LoadAligned(&dXs_[1][i])};
+
+        const VecType da2 = dx[0]*dx[0] + dx[1]*dx[1];
+        const VecType da_inv = approx_rsqrt<digits>(da2);
         const VecType n[2] = {dx[1]*da_inv, -dx[0]*da_inv};
 
         VecType M_[KDIM0][KDIM1];
         KerFn::template uKerMatrix<digits>(M_, r, n, nullptr);
+
+        const VecType quad_wts = VecType::LoadAligned(&wts[i]) * (da2 * da_inv) * KerFn::template uKerScaleFactor<Real>();
         for (Long k0 = 0; k0 < KDIM0; k0++) {
           for (Long k1 = 0; k1 < KDIM1; k1++) {
-            MM(i*KDIM0+k0, k1) = M_[k0][k1][0] * da * wts[i] * KerFn::template uKerScaleFactor<Real>();
+            (M_[k0][k1] * quad_wts).StoreAligned(&MM[k0*KDIM1+k1][i]);
           }
         }
       }
 
-      Matrix<Real> M_(Order, KDIM0*KDIM1, M.begin(), false);
-      Matrix<Real>::GEMM(M_, Minterp, Matrix<Real>(Nnds, KDIM0*KDIM1, MM.begin(), false));
+      Matrix<Real> M_(KDIM0*KDIM1, Order, M.begin(), false);
+      Matrix<Real>::GEMM(M_, MM, Minterp_t);
     }
 
     template <class KerFn, Integer digits, class Mat, class CoordVec> static void PanelKernelMatAdap(Mat& M, const CoordVec& Xs, const Real tol) { // assume Xt = 0
+      constexpr Integer VecLen = DefaultVecLen<Real>();
       static constexpr Integer DIM   = KerFn::CoordDim();
       static constexpr Integer KDIM0 = KerFn::SrcDim();
       static constexpr Integer KDIM1 = KerFn::TrgDim();
-      static_assert(Mat::template Dim<0>() == Order * KDIM0, "Output matrix dimension mismatch");
+      static_assert(Mat::template Dim<0>() == KDIM0, "Output matrix dimension mismatch");
       static_assert(Mat::template Dim<1>() == KDIM1, "Output matrix dimension mismatch");
+      static_assert(Mat::template Dim<2>() == Order, "Output matrix dimension mismatch");
       static_assert(DIM == COORD_DIM, "Coordinate dimension mismatch.");
 
-      static_assert(CoordVec::template Dim<0>() == Order, "Coordinate vector dimension mismatch");
-      static_assert(CoordVec::template Dim<1>() == COORD_DIM, "Coordinate vector dimension mismatch");
+      static_assert(CoordVec::template Dim<0>() == COORD_DIM, "Coordinate vector dimension mismatch");
+      static_assert(CoordVec::template Dim<1>() == Order, "Coordinate vector dimension mismatch");
 
       static const Matrix<Real> Minterp1 = InterpMat(PanelNds(), PanelNds()*0.5);
       static const Matrix<Real> Minterp2 = InterpMat(PanelNds(), PanelNds()*0.5+0.5);
@@ -688,7 +747,7 @@ namespace sctl {
       { // Set min_dist, min_idx
         Real min_dist2 = 0;
         for (Long i = 0; i < Order; i++) {
-          const Real dist2 =  Xs(i,0)*Xs(i,0) + Xs(i,1)*Xs(i,1);
+          const Real dist2 =  Xs(0,i)*Xs(0,i) + Xs(1,i)*Xs(1,i);
           if (i == 0 || dist2 < min_dist2) {
             min_dist2 = dist2;
             min_idx = i;
@@ -702,23 +761,23 @@ namespace sctl {
       if (tol <= 0) return;
 
       CoordVec Xs1, Xs2;
-      Matrix<Real> Xs1_(Order,COORD_DIM, Xs1.begin(), false);
-      Matrix<Real> Xs2_(Order,COORD_DIM, Xs2.begin(), false);
-      const Matrix<Real> Xs_(Order,COORD_DIM, (Iterator<Real>)Xs.begin(), false);
-      Matrix<Real>::GEMM(Xs1_, Minterp1_t, Xs_);
-      Matrix<Real>::GEMM(Xs2_, Minterp2_t, Xs_);
+      Matrix<Real> Xs1_(COORD_DIM,Order, Xs1.begin(), false);
+      Matrix<Real> Xs2_(COORD_DIM,Order, Xs2.begin(), false);
+      const Matrix<Real> Xs_(COORD_DIM,Order, (Iterator<Real>)Xs.begin(), false);
+      Matrix<Real>::GEMM(Xs1_, Xs_, Minterp1);
+      Matrix<Real>::GEMM(Xs2_, Xs_, Minterp2);
 
-      Mat MM;
+      alignas(sizeof(Real) * VecLen) Mat MM;
       { // Set MM
-        Mat Mchild1, Mchild2;
+        alignas(sizeof(Real) * VecLen) Mat Mchild1, Mchild2;
         PanelKernelMat<KerFn,digits>(Mchild1, Xs1);
         PanelKernelMat<KerFn,digits>(Mchild2, Xs2);
-        const Matrix<Real> Mchild1_(Order, KDIM0*KDIM1, Mchild1.begin(), false);
-        const Matrix<Real> Mchild2_(Order, KDIM0*KDIM1, Mchild2.begin(), false);
-        Matrix<Real> MM_(Order, KDIM0*KDIM1, MM.begin(), false);
+        const Matrix<Real> Mchild1_(KDIM0*KDIM1, Order, Mchild1.begin(), false);
+        const Matrix<Real> Mchild2_(KDIM0*KDIM1, Order, Mchild2.begin(), false);
+        Matrix<Real> MM_(KDIM0*KDIM1, Order, MM.begin(), false);
         //MM_ = Minterp1 * Mchild1_ + Minterp2 * Mchild2_;
-        Matrix<Real>::GEMM(MM_, Minterp1, Mchild1_);
-        Matrix<Real>::GEMM(MM_, Minterp2, Mchild2_, (Real)1);
+        Matrix<Real>::GEMM(MM_, Mchild1_, Minterp1_t);
+        Matrix<Real>::GEMM(MM_, Mchild2_, Minterp2_t, (Real)1);
       };
 
       const Real rel_err = [&MM,&M]() {
@@ -736,13 +795,13 @@ namespace sctl {
       }();
 
       const Real panel_len = [&Xs]() {
-        Tensor<Real,true,Order,2> dX;
-        Vector<Real> dX_(Order*COORD_DIM, dX.begin(), false);
-        ComputeDerivative(dX_, Vector<Real>(Order*COORD_DIM, (Iterator<Real>)Xs.begin(), false));
+        alignas(sizeof(Real) * VecLen) Tensor<Real,true,2,Order> dX;
+        Vector<Real> dX_(COORD_DIM*Order, dX.begin(), false);
+        ComputeDerivativeSoA(dX_, Vector<Real>(COORD_DIM*Order, (Iterator<Real>)Xs.begin(), false));
 
         Real sum = 0;
         for (Long i = 0; i < Order; i++) {
-          const Real da = sqrt<Real>(dX(i,0)*dX(i,0) + dX(i,1)*dX(i,1));
+          const Real da = sqrt<Real>(dX(0,i)*dX(0,i) + dX(1,i)*dX(1,i));
           sum += da * PanelWts()[i];
         }
         return sum;
@@ -762,7 +821,7 @@ namespace sctl {
           if (depth > 150) {
             for (Long i = 0; i < Order; i++) {
               for (Long k = 0; k < COORD_DIM; k++) {
-                std::cout<<Xs(i,k)<<' ';
+                std::cout<<Xs(k,i)<<' ';
               }
               std::cout<<'\n';
             }
@@ -775,15 +834,15 @@ namespace sctl {
           }
         }
       } else {
-        Mat M1, M2;
+        alignas(sizeof(Real) * VecLen) Mat M1, M2;
         PanelKernelMatAdap<KerFn,digits>(M1, Xs1, tol);
         PanelKernelMatAdap<KerFn,digits>(M2, Xs2, tol);
-        const Matrix<Real> M1_(Order, KDIM0*KDIM1, M1.begin(), false);
-        const Matrix<Real> M2_(Order, KDIM0*KDIM1, M2.begin(), false);
-        Matrix<Real> M_(Order, KDIM0*KDIM1, M.begin(), false);
+        const Matrix<Real> M1_(KDIM0*KDIM1, Order, M1.begin(), false);
+        const Matrix<Real> M2_(KDIM0*KDIM1, Order, M2.begin(), false);
+        Matrix<Real> M_(KDIM0*KDIM1, Order, M.begin(), false);
         //M_ = Minterp1 * M1_ + Minterp2 * M2_;
-        Matrix<Real>::GEMM(M_, Minterp1, M1_);
-        Matrix<Real>::GEMM(M_, Minterp2, M2_, (Real)1);
+        Matrix<Real>::GEMM(M_, M1_, Minterp1_t);
+        Matrix<Real>::GEMM(M_, M2_, Minterp2_t, (Real)1);
       }
     }
 
