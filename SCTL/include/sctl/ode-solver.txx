@@ -248,7 +248,8 @@ namespace sctl {
       Matrix<Real>::GEMM(Mv, M_time_step, Mf0);
       Mv_change -= Mv;
       picard_err[picard_iter] = max_norm(Mv_change) * dt;
-      if (verbose && !comm.Rank()) std::cout<<"SDC: picard_iter = " << picard_iter << ";  picard_err = " << picard_err[picard_iter] << "; delta_u = " << max_norm(Mv) * dt << '\n';
+      const Real rel_picard_err = picard_err[picard_iter] / (max_norm(Mv)*dt + machine_eps<Real>());
+      if (verbose && !comm.Rank()) std::cout<<"SDC: picard_iter = " << picard_iter << ";  picard_err = " << picard_err[picard_iter] << "; rel_picard_err = " << rel_picard_err << '\n';
       if (!failed_flag_ && picard_err[picard_iter] <= tol_picard) break; // converged
       if (picard_iter-picard_stagnate_steps>0 && picard_err[picard_iter] > picard_err[picard_iter-picard_stagnate_steps]) break; // stagnated
     }

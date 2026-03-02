@@ -249,11 +249,36 @@ namespace sctl {
       ~BoundaryIntegralOp();
 
       /**
-       * Specify quadrature accuracy tolerance.
+       * Set periodicity.
        *
-       * @param[in] tol quadrature accuracy.
+       * @param[in] periodicity periodicity type (NONE, X, XY, XYZ).
+       *
+       * @param[in] period_length length of the periodic box in each dimension.
+       * Must be positive if periodicity is not NONE.
+       *
+       * @remark Periodicity only supported in 3D and with PVFMM.
+       */
+      void SetPeriodicity(Periodicity periodicity, Real period_length = 0);
+
+      /**
+       * Get periodicity.
+       */
+      Periodicity GetPeriodicity() const;
+
+      /**
+       * Get period length.
+       */
+      Real GetPeriodLength() const;
+
+      /**
+       * Specify quadrature accuracy tolerance.
        */
       void SetAccuracy(Real tol);
+
+      /**
+       * Get quadrature accuracy tolerance.
+       */
+      Real GetAccuracy() const;
 
       /**
        * Set kernel functions for FMM translation operators (@see pvfmm.org).
@@ -266,8 +291,10 @@ namespace sctl {
        * @param[in] k_m2t multipole-to-target kernel.
        * @param[in] k_l2l local-to-local kernel.
        * @param[in] k_l2t local-to-target kernel.
+       * @param[in] m2l_vol_poten_fn evaluator for analytical potential from a uniform volume source density (for k_m2l).
+       * @param[in] m2t_vol_poten_fn evaluator for analytical potential from a uniform volume source density (for k_m2t).
        */
-      template <class KerS2M, class KerS2L, class KerS2T, class KerM2M, class KerM2L, class KerM2T, class KerL2L, class KerL2T> void SetFMMKer(const KerS2M& k_s2m, const KerS2L& k_s2l, const KerS2T& k_s2t, const KerM2M& k_m2m, const KerM2L& k_m2l, const KerM2T& k_m2t, const KerL2L& k_l2l, const KerL2T& k_l2t);
+      template <class KerS2M, class KerS2L, class KerS2T, class KerM2M, class KerM2L, class KerM2T, class KerL2L, class KerL2T> void SetFMMKer(const KerS2M& k_s2m, const KerS2L& k_s2l, const KerS2T& k_s2t, const KerM2M& k_m2m, const KerM2L& k_m2l, const KerM2T& k_m2t, const KerL2L& k_l2l, const KerL2T& k_l2t, const typename ParticleFMM<Real,COORD_DIM>::VolPotenT m2l_vol_poten = {}, const typename ParticleFMM<Real,COORD_DIM>::VolPotenT m2t_vol_poten = {});
 
       /**
        * Add an element-list.
@@ -375,6 +402,8 @@ namespace sctl {
       std::map<std::string,ElemLstData> elem_data_map;
       Vector<Real> Xt; // User specified position of target points
       Vector<Real> Xnt; // User specified normal at target points
+      Periodicity periodicity_ = Periodicity::NONE;
+      Real period_length_ = 0;
       Real tol_;
       Kernel ker_;
       bool trg_normal_dot_prod_;

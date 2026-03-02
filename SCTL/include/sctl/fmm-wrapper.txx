@@ -235,19 +235,51 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetComm(const Com
   #endif
 }
 
-template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetAccuracy(Integer digits) {
+template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetPeriodicity(Periodicity p, Real period_length) {
+  if (periodicity_ == p && period_length_ == period_length) return;
+  periodicity_ = p;
+  period_length_ = period_length;
+  SCTL_ASSERT(periodicity_ == Periodicity::NONE || period_length_ > 0);
+
   #ifdef SCTL_HAVE_PVFMM
-  if (DIM == 3 && digits != digits_) {
+  if (DIM == 3) {
+    for (auto& it : s2t_map) {
+      it.second.setup_tree = true;
+    }
+  } else {
+    SCTL_ASSERT_MSG(p == Periodicity::NONE, "Periodicity only supported in 3D with PVFMM.");
+  }
+  #else
+  SCTL_ASSERT_MSG(p == Periodicity::NONE, "Periodicity only supported in 3D with PVFMM.");
+  #endif
+}
+
+template <class Real, Integer DIM> Periodicity ParticleFMM<Real,DIM>::GetPeriodicity() const {
+  return periodicity_;
+}
+
+template <class Real, Integer DIM> Real ParticleFMM<Real,DIM>::GetPeriodLength() const {
+  return period_length_;
+}
+
+template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetAccuracy(Integer digits) {
+  if (digits_ == digits) return;
+  digits_ = digits;
+
+  #ifdef SCTL_HAVE_PVFMM
+  if (DIM == 3) {
     for (auto& it : s2t_map) {
       it.second.setup_ker = true;
-      it.second.setup_tree = true;
     }
   }
   #endif
-  digits_ = digits;
 }
 
-template <class Real, Integer DIM> template <class KerM2M, class KerM2L, class KerL2L> void ParticleFMM<Real,DIM>::SetKernels(const KerM2M& ker_m2m, const KerM2L& ker_m2l, const KerL2L& ker_l2l) {
+template <class Real, Integer DIM> Integer ParticleFMM<Real,DIM>::GetAccuracy() const {
+  return digits_;
+}
+
+template <class Real, Integer DIM> template <class KerM2M, class KerM2L, class KerL2L> void ParticleFMM<Real,DIM>::SetKernels(const KerM2M& ker_m2m, const KerM2L& ker_m2l, const KerL2L& ker_l2l, const VolPotenT m2l_vol_poten) {
   if (fmm_ker.ker_m2m != NullIterator<char>()) fmm_ker.delete_ker_m2m(fmm_ker.ker_m2m);
   if (fmm_ker.ker_m2l != NullIterator<char>()) fmm_ker.delete_ker_m2l(fmm_ker.ker_m2l);
   if (fmm_ker.ker_l2l != NullIterator<char>()) fmm_ker.delete_ker_l2l(fmm_ker.ker_l2l);
@@ -280,11 +312,23 @@ template <class Real, Integer DIM> template <class KerM2M, class KerM2L, class K
   #ifdef SCTL_HAVE_PVFMM
   if (DIM == 3) {
     fmm_ker.pvfmm_ker_m2m = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2M>::template Eval<Real>>(ker_m2m.Name().c_str(), DIM, std::pair<int,int>(ker_m2m.SrcDim(), ker_m2m.TrgDim()));
-    fmm_ker.pvfmm_ker_m2l = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2L>::template Eval<Real>>(ker_m2l.Name().c_str(), DIM, std::pair<int,int>(ker_m2l.SrcDim(), ker_m2l.TrgDim()));
+    if (m2l_vol_poten) {
+      const auto SrcDim = ker_m2l.SrcDim();
+      const auto TrgDim = ker_m2l.TrgDim();
+      const auto vol_poten = [m2l_vol_poten,SrcDim,TrgDim](const Real* coord, int n, Real* u) {
+        const Vector<Real> coord_(n*DIM, (Iterator<Real>)Ptr2ConstItr<Real>(coord, n*DIM), false);
+        Matrix<Real> u_(SrcDim, n*TrgDim, Ptr2Itr<Real>(u, SrcDim*n*TrgDim), false);
+        m2l_vol_poten(u_, coord_);
+        SCTL_ASSERT(u_.Dim(0) == SrcDim);
+        SCTL_ASSERT(u_.Dim(1) == n*TrgDim);
+      };
+      fmm_ker.pvfmm_ker_m2l = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2L>::template Eval<Real>>(ker_m2l.Name().c_str(), DIM, std::pair<int,int>(ker_m2l.SrcDim(), ker_m2l.TrgDim()), nullptr, nullptr,nullptr, nullptr,nullptr,nullptr, nullptr, nullptr, vol_poten);
+    } else {
+      fmm_ker.pvfmm_ker_m2l = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2L>::template Eval<Real>>(ker_m2l.Name().c_str(), DIM, std::pair<int,int>(ker_m2l.SrcDim(), ker_m2l.TrgDim()));
+    }
     fmm_ker.pvfmm_ker_l2l = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerL2L>::template Eval<Real>>(ker_l2l.Name().c_str(), DIM, std::pair<int,int>(ker_l2l.SrcDim(), ker_l2l.TrgDim()));
     for (auto& it : s2t_map) {
       it.second.setup_ker = true;
-      it.second.setup_tree = true;
     }
   }
   #endif
@@ -332,7 +376,7 @@ template <class Real, Integer DIM> template <class KerS2M, class KerS2L> void Pa
   }
   #endif
 }
-template <class Real, Integer DIM> template <class KerM2T, class KerL2T> void ParticleFMM<Real,DIM>::AddTrg(const std::string& name, const KerM2T& ker_m2t, const KerL2T& ker_l2t) {
+template <class Real, Integer DIM> template <class KerM2T, class KerL2T> void ParticleFMM<Real,DIM>::AddTrg(const std::string& name, const KerM2T& ker_m2t, const KerL2T& ker_l2t, const VolPotenT m2t_vol_poten) {
   SCTL_ASSERT_MSG(trg_map.find(name) == trg_map.end(), "Target name already exists.");
   trg_map[name] = TrgData();
   auto& data = trg_map[name];
@@ -358,7 +402,20 @@ template <class Real, Integer DIM> template <class KerM2T, class KerL2T> void Pa
 
   #ifdef SCTL_HAVE_PVFMM
   if (DIM == 3) {
-    data.pvfmm_ker_m2t = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2T>::template Eval<Real>>(ker_m2t.Name().c_str(), DIM, std::pair<int,int>(ker_m2t.SrcDim(), ker_m2t.TrgDim()));
+    if (m2t_vol_poten) {
+      const auto SrcDim = ker_m2t.SrcDim();
+      const auto TrgDim = ker_m2t.TrgDim();
+      const auto vol_poten = [m2t_vol_poten,SrcDim,TrgDim](const Real* coord, int n, Real* u) {
+        const Vector<Real> coord_(n*DIM, (Iterator<Real>)Ptr2ConstItr<Real>(coord, n*DIM), false);
+        Matrix<Real> u_(SrcDim, n*TrgDim, Ptr2Itr<Real>(u, SrcDim*n*TrgDim), false);
+        m2t_vol_poten(u_, coord_);
+        SCTL_ASSERT(u_.Dim(0) == SrcDim);
+        SCTL_ASSERT(u_.Dim(1) == n*TrgDim);
+      };
+      data.pvfmm_ker_m2t = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2T>::template Eval<Real>>(ker_m2t.Name().c_str(), DIM, std::pair<int,int>(ker_m2t.SrcDim(), ker_m2t.TrgDim()), nullptr, nullptr,nullptr, nullptr,nullptr,nullptr, nullptr, nullptr, vol_poten);
+    } else {
+      data.pvfmm_ker_m2t = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2T>::template Eval<Real>>(ker_m2t.Name().c_str(), DIM, std::pair<int,int>(ker_m2t.SrcDim(), ker_m2t.TrgDim()));
+    }
     data.pvfmm_ker_l2t = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerL2T>::template Eval<Real>>(ker_l2t.Name().c_str(), DIM, std::pair<int,int>(ker_l2t.SrcDim(), ker_l2t.TrgDim()));
     for (auto& it : s2t_map) {
       if (it.first.second != name) continue;
@@ -400,7 +457,6 @@ template <class Real, Integer DIM> template <class KerS2T> void ParticleFMM<Real
   }
   data.tree_ptr = nullptr;
   data.setup_ker = true;
-  data.setup_tree = true;
   #endif
 }
 
@@ -442,7 +498,7 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::DeleteS2T(const s
 }
 
 template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetSrcCoord(const std::string& name, const Vector<Real>& src_coord, const Vector<Real>& src_normal) {
-  SCTL_ASSERT_MSG(src_map.find(name) != src_map.end(), "Target name does not exist.");
+  SCTL_ASSERT_MSG(src_map.find(name) != src_map.end(), "Source name does not exist.");
   auto& data = src_map[name];
   data.X = src_coord;
   data.Xn = src_normal;
@@ -458,7 +514,7 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetSrcCoord(const
   #endif
 }
 template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetSrcDensity(const std::string& name, const Vector<Real>& src_density) {
-  SCTL_ASSERT_MSG(src_map.find(name) != src_map.end(), "Target name does not exist.");
+  SCTL_ASSERT_MSG(src_map.find(name) != src_map.end(), "Source name does not exist.");
   auto& data = src_map[name];
   data.F = src_density;
 }
@@ -554,14 +610,6 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::EvalDirect(Vector
       send_recv_vec(Xs_, Xs, i);
       send_recv_vec(Xn_, Xn, i);
       send_recv_vec(F_ , F , i);
-      if (comm_.Size() == 1) {
-        SCTL_ASSERT(Xs_.Dim() == Xs.Dim());
-        SCTL_ASSERT(Xn_.Dim() == Xn.Dim());
-        SCTL_ASSERT( F_.Dim() ==  F.Dim());
-        for (Long i = 0 ; i < Xs.Dim(); i++) SCTL_ASSERT(Xs[i] == Xs_[i]);
-        for (Long i = 0 ; i < Xn.Dim(); i++) SCTL_ASSERT(Xn[i] == Xn_[i]);
-        for (Long i = 0 ; i <  F.Dim(); i++) SCTL_ASSERT( F[i] ==  F_[i]);
-      }
       it.second.ker_s2t_eval_omp(U, Xt, Xs_, Xn_, F_, digits_, it.second.ker_s2t);
     }
   }
@@ -696,7 +744,7 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::BuildSrcTrgScal(c
       if (dot11>max_val*eps && dot22>max_val*eps) {
         Real s = dot12 / dot11;
         M_scal[0][i] = log<Real>(s) / log<Real>(2.0);
-        Real err = sqrt<Real>((Real)0.5*(dot22/dot11)/(s*s) - (Real)0.5);
+        Real err = sctl::fabs<Real>(1 - dot12*dot12/dot11/dot22);
         if (err > eps_) {
           scale_invar = false;
           M_scal[0][i] = 0.0;
@@ -803,7 +851,7 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::EvalPVFMM(Vector<
 
   const Long Nt = Xt.Dim() / DIM;
   SCTL_ASSERT(Xt.Dim() == Nt * DIM);
-  { // User EvalDirect for small problems
+  if (periodicity_ == Periodicity::NONE) { // Use EvalDirect for small problems or with periodicity
     StaticArray<Long,2> cnt{Nt,0};
     comm_.Allreduce<Long>(cnt+0, cnt+1, 1, CommOp::SUM);
     if (cnt[1] < 40000) return EvalDirect(U, trg_name);
@@ -847,6 +895,7 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::EvalPVFMM(Vector<
         pvfmm_ker_s2t.k_s2l = &src_data.pvfmm_ker_s2l;
         fmm_ctx.Initialize(mult_order, comm_.GetMPI_Comm(), &pvfmm_ker_s2t);
         s2t_data.setup_ker = false;
+        s2t_data.setup_tree = true;
       }
 
       std::vector<Real> sl_den_, dl_den_;
@@ -868,8 +917,17 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::EvalPVFMM(Vector<
             bbox_offset[k] = (bbox[k*2+0] + bbox[k*2+1])/2;
             bbox_len = std::max<Real>(bbox_len, bbox[k*2+1]-bbox[k*2+0]);
           }
+          if (periodicity_ != Periodicity::NONE) {
+            // Do not offset in periodic directions
+            if (periodicity_==Periodicity::XYZ || periodicity_==Periodicity::XY || periodicity_==Periodicity::X) bbox_offset[0] = 0;
+            if (periodicity_==Periodicity::XYZ || periodicity_==Periodicity::XY) bbox_offset[1] = 0;
+            if (periodicity_==Periodicity::XYZ) bbox_offset[2] = 0;
+            bbox_len = period_length_;
+          } else {
+            bbox_len *= (Real)1.1; // extra 5% padding so that points are not on boundary
+          }
 
-          bbox_scale = 1/(bbox_len*(Real)1.1); // extra 5% padding so that points are not on boundary
+          bbox_scale = 1/bbox_len;
           for (Integer k = 0; k < DIM; k++) {
             bbox_offset[k] -= 1/(2*bbox_scale);
           }
@@ -886,21 +944,47 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::EvalPVFMM(Vector<
         std::vector<Real> sl_coord_, dl_coord_, trg_coord_(Nt*DIM);
         auto& src_coord = (NorDim ? dl_coord_ : sl_coord_);
         src_coord.resize(Ns * DIM);
+        Integer periodic_wrap_max_k = -1;
         for (Long i = 0; i < Ns; i++) {
           for (Integer k = 0; k < DIM; k++) {
-            src_coord[i*DIM+k] = (Xs[i*DIM+k] - bbox_offset[k]) * bbox_scale;
+            Real x = (Xs[i*DIM+k] - bbox_offset[k]) * bbox_scale;
+            if (x >= 1 || x <  0) { // Periodic wrap around for source points
+              x -= sctl::floor(x);
+              periodic_wrap_max_k = std::max<Integer>(periodic_wrap_max_k, k);
+            }
+            src_coord[i*DIM+k] = x;
           }
         }
         for (Long i = 0; i < Nt; i++) {
           for (Integer k = 0; k < DIM; k++) {
-            trg_coord_[i*DIM+k] = (Xt[i*DIM+k] - bbox_offset[k]) * bbox_scale;
+            Real x = (Xt[i*DIM+k] - bbox_offset[k]) * bbox_scale;
+            if (x >= 1 || x <  0) { // Periodic wrap around for target points
+              x -= sctl::floor(x);
+              periodic_wrap_max_k = std::max<Integer>(periodic_wrap_max_k, k);
+            }
+            trg_coord_[i*DIM+k] = x;
           }
+        }
+        switch (periodicity_) { // Check if points are within periodic box
+          case Periodicity::NONE: SCTL_ASSERT(periodic_wrap_max_k < 0); break;
+          case Periodicity::X:    SCTL_ASSERT(periodic_wrap_max_k < 1); break;
+          case Periodicity::XY:   SCTL_ASSERT(periodic_wrap_max_k < 2); break;
+          case Periodicity::XYZ:  /* do nothing */ break;
+          default: SCTL_ASSERT_MSG(false, "Periodicity type not supported by PVFMM.");
         }
 
         if (tree_ptr) delete tree_ptr;
         sl_den_.resize(NorDim ? 0 : Ns*SrcDim);
         dl_den_.resize(NorDim ? Ns*(SrcDim+NorDim) : 0);
-        tree_ptr = PtFMM_CreateTree(sl_coord_, sl_den_, dl_coord_, dl_den_, trg_coord_, comm_.GetMPI_Comm(), max_pts, pvfmm::FreeSpace);
+        pvfmm::BoundaryType pvfmm_bc;
+        switch (periodicity_) {
+          case Periodicity::NONE: pvfmm_bc = pvfmm::BoundaryType::FreeSpace; break;
+          case Periodicity::X:    pvfmm_bc = pvfmm::BoundaryType::PX;   break;
+          case Periodicity::XY:   pvfmm_bc = pvfmm::BoundaryType::PXY;  break;
+          case Periodicity::XYZ:  pvfmm_bc = pvfmm::BoundaryType::PXYZ; break;
+          default: SCTL_ASSERT_MSG(false, "Periodicity type not supported by PVFMM.");
+        }
+        tree_ptr = PtFMM_CreateTree(sl_coord_, sl_den_, dl_coord_, dl_den_, trg_coord_, comm_.GetMPI_Comm(), max_pts, pvfmm_bc);
         tree_ptr->SetupFMM(&fmm_ctx);
         s2t_data.setup_tree = false;
       } else {

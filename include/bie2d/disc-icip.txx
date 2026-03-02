@@ -860,7 +860,7 @@ namespace sctl {
       Real precond_l2_err = 0, precond_linf_err = 0;
       if (precond && precond->Size() == rhs_.Dim() && precond->Rank() > 0) { // test the accuracy of the preconditioner
         Vector<Real> err, tmp = rhs_;
-        (*precond).Apply(tmp);
+        (*precond).Apply(tmp, comm);
         BIOp(&err, tmp);
         err -= rhs_;
         const auto norm2 = [](const Vector<Real>& v){

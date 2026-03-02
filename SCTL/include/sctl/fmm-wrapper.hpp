@@ -4,11 +4,13 @@
 #include <map>                   // for map
 #include <string>                // for basic_string, string
 #include <utility>               // for pair
+#include <cstdint>               // for uint8_t
 
 #include "sctl/common.hpp"       // for Integer, sctl
 #include "sctl/comm.hpp"         // for Comm
 #include "sctl/comm.txx"         // for Comm::Self
 #include "sctl/vector.hpp"       // for Vector
+#include "sctl/matrix.hpp"       // for Matrix
 
 #ifdef SCTL_HAVE_PVFMM
 namespace pvfmm {
@@ -26,12 +28,31 @@ namespace pvfmm {
 namespace sctl {
 
 /**
+ * Enum for periodicity in each coordinate direction.
+ */
+enum class Periodicity : uint8_t {
+  NONE = 0,
+  X = 1u << 0,
+  Y = 1u << 1,
+  Z = 1u << 2,
+  XY = X | Y,
+  XYZ = X | Y | Z
+};
+
+/**
  * Evaluate potentials from particle sources using PVFMM when available, otherwise, use direct
  * computation.  To enable PVFMM, the macro `SCTL_HAVE_PVFMM` must be defined, the code must be
  * compiled with MPI and linked to PVFMM.
  */
 template <class Real, Integer DIM> class ParticleFMM {
   public:
+
+    /**
+     * Type for volume potential evaluator function.
+     * @param[out] u computed potential of size (SrcDim x N*TrgDim).
+     * @param[in] coord coordinate vector of size (N*DIM).
+     */
+    using VolPotenT = std::function<void(Matrix<Real>& u, const Vector<Real>& coord)>;
 
     // Delete copy constructor and assignment operator
     ParticleFMM(const ParticleFMM&) = delete;
@@ -57,6 +78,33 @@ template <class Real, Integer DIM> class ParticleFMM {
     void SetComm(const Comm& comm);
 
     /**
+     * Get communicator.
+     */
+    Comm GetComm() const;
+
+    /**
+     * Set periodicity.
+     *
+     * @param[in] periodicity periodicity type.
+     *
+     * @param[in] period_length length of the periodic box in each dimension.
+     * Must be positive if periodicity is not NONE.
+     *
+     * @remark Periodicity only supported in 3D and with PVFMM.
+     */
+    void SetPeriodicity(Periodicity periodicity, Real period_length = 0);
+
+    /**
+     * Get periodicity.
+     */
+    Periodicity GetPeriodicity() const;
+
+    /**
+     * Get period length.
+     */
+    Real GetPeriodLength() const;
+
+    /**
      * Set FMM accuracy
      *
      * @param[in] digits number of digits of accuracy.
@@ -64,13 +112,19 @@ template <class Real, Integer DIM> class ParticleFMM {
     void SetAccuracy(Integer digits);
 
     /**
+     * Get FMM accuracy
+     */
+    Integer GetAccuracy() const;
+
+    /**
      * Set kernel objects for KIFMM.
      *
      * @param[in] ker_m2m kernel for multipole-to-multipole translations.
      * @param[in] ker_m2l kernel for multipole-to-local translations.
      * @param[in] ker_l2l kernel for local-to-local translations.
+     * @param[in] m2l_vol_poten_fn evaluator for analytical potential from a uniform volume source density.
      */
-    template <class KerM2M, class KerM2L, class KerL2L> void SetKernels(const KerM2M& ker_m2m, const KerM2L& ker_m2l, const KerL2L& ker_l2l);
+    template <class KerM2M, class KerM2L, class KerL2L> void SetKernels(const KerM2M& ker_m2m, const KerM2L& ker_m2l, const KerL2L& ker_l2l, const VolPotenT m2l_vol_poten = {});
 
     /**
      * Add a source type.
@@ -87,8 +141,9 @@ template <class Real, Integer DIM> class ParticleFMM {
      * @param[in] name name for the target type.
      * @param[in] ker_m2t kernel for multipole-to-target translations.
      * @param[in] ker_l2t kernel for local-to-target translations.
+     * @param[in] m2t_vol_poten_fn evaluator for analytical potential from a uniform volume source density.
      */
-    template <class KerM2T, class KerL2T> void AddTrg(const std::string& name, const KerM2T& ker_m2t, const KerL2T& ker_l2t);
+    template <class KerM2T, class KerL2T> void AddTrg(const std::string& name, const KerM2T& ker_m2t, const KerL2T& ker_l2t, const VolPotenT m2t_vol_poten = {});
 
     /**
      * Set kernel function for source-to-target interactions.
@@ -187,6 +242,8 @@ template <class Real, Integer DIM> class ParticleFMM {
 
     Comm comm_;
     Integer digits_;
+    Periodicity periodicity_ = Periodicity::NONE;
+    Real period_length_ = 0;
 };
 
 }  // end namespace

@@ -26,27 +26,24 @@ CXXFLAGS += -DSCTL_QUAD_T=__float128 # Enable quadruple precision
 
 #CXXFLAGS += -DSCTL_HAVE_MPI #use MPI
 
-#CXXFLAGS += -lblas -DSCTL_HAVE_BLAS # use BLAS
-#CXXFLAGS += -llapack -DSCTL_HAVE_LAPACK # use LAPACK
+CXXFLAGS += -lblas -DSCTL_HAVE_BLAS # use BLAS
+CXXFLAGS += -llapack -DSCTL_HAVE_LAPACK # use LAPACK
 #CXXFLAGS += -qmkl -DSCTL_HAVE_BLAS -DSCTL_HAVE_LAPACK -DSCTL_HAVE_FFTW3_MKL # use MKL BLAS, LAPACK and FFTW (Intel compiler)
 #CXXFLAGS += -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -DSCTL_HAVE_BLAS -DSCTL_HAVE_LAPACK # use MKL BLAS and LAPACK (non-Intel compiler)
-#CXXFLAGS += -lmkl_intel_lp64 -lmkl_intel_thread -lmkl_core -lpthread -DSCTL_HAVE_BLAS -DSCTL_HAVE_LAPACK # use MKL BLAS and LAPACK (non-Intel compiler)
-#CXXFLAGS +=  -m64  -L${MKLROOT}/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lpthread -lm -ldl
-#CXXFLAGS += -DSCTL_HAVE_BLAS -DSCTL_HAVE_LAPACK
 
-#CXXFLAGS += -lfftw3_omp -DSCTL_FFTW_THREADS
-#CXXFLAGS += -lfftw3 -DSCTL_HAVE_FFTW
-#CXXFLAGS += -lfftw3f -DSCTL_HAVE_FFTWF
-#CXXFLAGS += -lfftw3l -DSCTL_HAVE_FFTWL
+CXXFLAGS += -lfftw3_omp -DSCTL_FFTW_THREADS
+CXXFLAGS += -lfftw3 -DSCTL_HAVE_FFTW
+CXXFLAGS += -lfftw3f -DSCTL_HAVE_FFTWF
+CXXFLAGS += -lfftw3l -DSCTL_HAVE_FFTWL
 
-CXXFLAGS += -lmvec -lm -DSCTL_HAVE_LIBMVEC
+#CXXFLAGS += -lmvec -lm -DSCTL_HAVE_LIBMVEC
 #CXXFLAGS += -DSCTL_HAVE_SVML
 
 #CXXFLAGS += -I${PETSC_DIR}/include -I${PETSC_DIR}/../include -DSCTL_HAVE_PETSC
 #LDLIBS += -L${PETSC_DIR}/lib -lpetsc
 
-#PVFMM_INC_DIR = /mnt/home/dmalhotra/sandbox/pvfmm/include
-#PVFMM_LIB_DIR = /mnt/home/dmalhotra/sandbox/pvfmm/lib/.libs
+#PVFMM_INC_DIR = ../include
+#PVFMM_LIB_DIR = ../lib/.libs
 #CXXFLAGS += -DSCTL_HAVE_PVFMM -I$(PVFMM_INC_DIR)
 #LDLIBS += $(PVFMM_LIB_DIR)/libpvfmm.a
 
