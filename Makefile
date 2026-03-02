@@ -1,14 +1,15 @@
 SCTL_INCLUDE_DIR = SCTL/include
 DISC_INTERP_ORDER ?= 512
 
-CXX=c++ # requires g++-8 or newer / icpc (with gcc compatibility 7.5 or newer) / clang++ with llvm-10 or newer
+#CXX=c++ # requires g++-8 or newer / icpc (with gcc compatibility 7.5 or newer) / clang++ with llvm-10 or newer
+CXX=mpicxx -DSCTL_HAVE_MPI
 #CXX=/mnt/sw/nix/store/jrw0k2lr4i16pn5ja1rp34wzazdq7ivw-intel-oneapi-compilers-2023.0.0/compiler/2023.0.0/linux/bin/icpx
 CXXFLAGS = -std=c++11 -fopenmp -Wall -Wfloat-conversion -DDISC_INTERP_ORDER=${DISC_INTERP_ORDER} # need C++11 and OpenMP
 
 #Optional flags
 DEBUG ?= 0
 ifeq ($(DEBUG), 1)
-	CXXFLAGS += -O0 -fsanitize=address,leak,undefined,pointer-compare,pointer-subtract,float-divide-by-zero,float-cast-overflow -fno-sanitize-recover=all -fstack-protector # debug build
+	CXXFLAGS += -O0 -march=native -DNDEBUG -fsanitize=address,leak,undefined,pointer-compare,pointer-subtract,float-divide-by-zero,float-cast-overflow -fno-sanitize-recover=all -fstack-protector # debug build
   CXXFLAGS += -DSCTL_MEMDEBUG # Enable memory checks
 else
 	CXXFLAGS += -O3 -march=native -DNDEBUG # release build
@@ -20,6 +21,8 @@ ifeq "$(OS)" "Darwin"
 else
 	CXXFLAGS += -gdwarf-4 -g -rdynamic # for stack trace -gstrict-dwarf
 endif
+
+#CXXFLAGS += -DSCTL_GLOBAL_MEM_BUFF=40000 # Global memory buffer size in MB
 
 CXXFLAGS += -DSCTL_PROFILE=5 -DSCTL_VERBOSE # Enable profiling
 CXXFLAGS += -DSCTL_SIG_HANDLER
@@ -47,6 +50,13 @@ CXXFLAGS += -DSCTL_HAVE_LIBMVEC
 #PVFMM_LIB_DIR = ../lib/.libs
 #CXXFLAGS += -DSCTL_HAVE_PVFMM -I$(PVFMM_INC_DIR)
 #LDLIBS += $(PVFMM_LIB_DIR)/libpvfmm.a
+
+# fmm2d settings for bench-stokes2d
+FMM2D_DIR ?= extern/fmm2d
+FMM2D_LIB ?= $(FMM2D_DIR)/lib-static/libfmm2d.a
+CXXFLAGS += -DSCTL_HAVE_FMM2D
+LDLIBS += $(FMM2D_LIB) -lgfortran -lquadmath -ldl
+
 
 RM = rm -f
 MKDIRS = mkdir -p

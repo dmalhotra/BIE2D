@@ -3,10 +3,13 @@
 
 #include <stdlib.h>                   // for drand48, srand48
 #include <algorithm>                  // for max, min
+#include <cmath>                      // for pow
 #include <iostream>                   // for basic_ostream, operator<<, cout
 #include <map>                        // for map
 #include <string>                     // for basic_string, string
+#include <type_traits>                // for is_same
 #include <utility>                    // for pair, make_pair
+#include <vector>                     // for vector
 
 #include "sctl/common.hpp"            // for Integer, SCTL_ASSERT, Long, SCT...
 #include "sctl/fmm-wrapper.hpp"       // for ParticleFMM
@@ -30,9 +33,89 @@
 #include <pvfmm.hpp>
 #endif
 
+#ifdef SCTL_HAVE_FMM2D
+extern "C" {
+void stfmm2d_(int* nd, double* eps, int* nsource, double* source, int* ifstoklet,
+              double* stoklet, int* ifstrslet, double* strslet, double* strsvec,
+              int* ifppreg, double* pot, double* pre, double* grad, int* ntarg,
+              double* targ, int* ifppregtarg, double* pottarg, double* pretarg,
+              double* gradtarg, int* ier);
+}
+#endif
+
 namespace sctl {
 
 template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::test(const Comm& comm) {
+  if (DIM == 2) {
+    Stokes2D_FxU kernel_fmm;
+    Stokes2D_FxU kernel_sl;
+    Stokes2D_DxU kernel_dl;
+    srand48(comm.Rank());
+
+    // Create target and source vectors.
+    const Long N = 3500/comm.Size();
+    Vector<Real> trg_coord(N*DIM);
+    Vector<Real>  sl_coord(N*DIM);
+    Vector<Real>  dl_coord(N*DIM);
+    Vector<Real>  sl_norml(N*DIM);
+    Vector<Real>  dl_norml(N*DIM);
+    for (auto& a : trg_coord) a = (Real)(drand48()-0.5);
+    for (auto& a :  sl_coord) a = (Real)(drand48()-0.5);
+    for (auto& a :  dl_coord) a = (Real)(drand48()-0.5);
+    for (auto& a :  sl_norml) a = (Real)(drand48()-0.5);
+    for (auto& a :  dl_norml) a = (Real)(drand48()-0.5);
+    Long n_sl = sl_coord.Dim()/DIM;
+    Long n_dl = dl_coord.Dim()/DIM;
+
+    // Set source charges.
+    Vector<Real> sl_den(n_sl*kernel_sl.SrcDim());
+    Vector<Real> dl_den(n_dl*kernel_dl.SrcDim());
+    for (auto& a : sl_den) a = (Real)(drand48() - 0.5);
+    for (auto& a : dl_den) a = (Real)(drand48() - 0.5);
+
+    ParticleFMM fmm(comm);
+    fmm.SetAccuracy(10);
+
+    // Set kernel functions
+    fmm.SetKernels(kernel_fmm, kernel_fmm, kernel_fmm);
+    fmm.AddTrg("Velocity", kernel_fmm, kernel_fmm);
+    fmm.AddSrc("SingleLayer", kernel_sl, kernel_sl);
+    fmm.AddSrc("DoubleLayer", kernel_dl, kernel_dl);
+    fmm.SetKernelS2T("SingleLayer", "Velocity", kernel_sl);
+    fmm.SetKernelS2T("DoubleLayer", "Velocity", kernel_dl);
+
+    // Set particle data
+    fmm.SetTrgCoord("Velocity", trg_coord);
+    fmm.SetSrcCoord("SingleLayer", sl_coord, sl_norml);
+    fmm.SetSrcCoord("DoubleLayer", dl_coord, dl_norml);
+    fmm.SetSrcDensity("SingleLayer", sl_den);
+    fmm.SetSrcDensity("DoubleLayer", dl_den);
+
+    Vector<Real> Ufmm, Uref;
+    fmm.Eval(Ufmm, "Velocity"); // Warm-up run
+    Ufmm = 0;
+
+    Profile::Enable(true);
+    Profile::Tic("FMM-Eval", &comm);
+    fmm.Eval(Ufmm, "Velocity");
+    Profile::Toc();
+
+    Profile::Tic("Direct", &comm);
+    fmm.EvalDirect(Uref, "Velocity");
+    Profile::Toc();
+    Profile::print(&comm);
+
+    Vector<Real> Uerr = Uref - Ufmm;
+    { // Print error
+      StaticArray<Real,2> loc_err{0,0}, glb_err{0,0};
+      for (const auto& a : Uerr) loc_err[0] = std::max<Real>(loc_err[0], fabs(a));
+      for (const auto& a : Uref) loc_err[1] = std::max<Real>(loc_err[1], fabs(a));
+      comm.Allreduce<Real>(loc_err, glb_err, 2, CommOp::MAX);
+      if (!comm.Rank()) std::cout<<"Maximum relative error: "<<glb_err[0]/glb_err[1]<<'\n';
+    }
+    return;
+  }
+
   if (DIM != 3) return ParticleFMM<Real,3>::test(comm);
 
   Stokes3D_FSxU kernel_m2l;
@@ -147,6 +230,7 @@ template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::TrgData {
 };
 template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::S2TData {
   Iterator<char> ker_s2t;
+  std::string ker_name;
   Integer dim_src, dim_trg, dim_normal;
 
   void (*ker_s2t_eval)(Vector<Real>& v_trg, const Vector<Real>& r_trg, const Vector<Real>& r_src, const Vector<Real>& n_src, const Vector<Real>& v_src, Integer digits, ConstIterator<char> self);
@@ -436,6 +520,7 @@ template <class Real, Integer DIM> template <class KerS2T> void ParticleFMM<Real
 
   data.ker_s2t = (Iterator<char>)aligned_new<KerS2T>(1);
   (*(Iterator<KerS2T>)data.ker_s2t) = ker_s2t;
+  data.ker_name = ker_s2t.Name();
 
   data.dim_src = ker_s2t.SrcDim();
   data.dim_trg = ker_s2t.TrgDim();
@@ -536,6 +621,104 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::SetTrgCoord(const
 
 template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::Eval(Vector<Real>& U, const std::string& trg_name) const {
   CheckKernelDims();
+
+  #ifdef SCTL_HAVE_FMM2D
+  if (DIM == 2 && std::is_same<Real,double>::value) {
+    SCTL_ASSERT_MSG(trg_map.find(trg_name) != trg_map.end(), "Target name does not exist.");
+    const auto& trg_data = trg_map.at(trg_name);
+    const Integer TrgDim = trg_data.dim_trg;
+    const auto& Xt = trg_data.X;
+    const Long Nt = Xt.Dim() / DIM;
+    SCTL_ASSERT(Xt.Dim() == Nt * DIM);
+
+    bool use_fmm2d = (comm_.Size() == 1 && TrgDim == 2);
+    bool has_stokes2d_s2t = false;
+    for (auto& it : s2t_map) {
+      if (it.first.second != trg_name) continue;
+      has_stokes2d_s2t = true;
+      if (it.second.ker_name != "Stokes2D-FxU" && it.second.ker_name != "Stokes2D-DxU") {
+        use_fmm2d = false;
+        break;
+      }
+      if (it.second.dim_src != 2 || it.second.dim_trg != 2) {
+        use_fmm2d = false;
+        break;
+      }
+      const auto& src_data = src_map.at(it.first.first);
+      if (src_data.dim_src != 2) {
+        use_fmm2d = false;
+        break;
+      }
+      if (it.second.ker_name == "Stokes2D-DxU" && src_data.dim_normal != 2) {
+        use_fmm2d = false;
+        break;
+      }
+    }
+
+    if (use_fmm2d && has_stokes2d_s2t) {
+      std::vector<double> Ufmm(2 * Nt, 0.0);
+      bool call_ok = true;
+
+      for (auto& it : s2t_map) {
+        if (it.first.second != trg_name) continue;
+        const auto& src_data = src_map.at(it.first.first);
+        const Long Ns = src_data.X.Dim() / DIM;
+        SCTL_ASSERT(src_data.X.Dim() == Ns * DIM);
+        SCTL_ASSERT(src_data.F.Dim() == Ns * 2);
+        SCTL_ASSERT(src_data.Xn.Dim() == Ns * src_data.dim_normal);
+        if (Ns == 0 || Nt == 0) continue;
+
+        const int nd = 1;
+        const int nsource = static_cast<int>(Ns);
+        const int ntarg = static_cast<int>(Nt);
+        const int ifstoklet = (it.second.ker_name == "Stokes2D-FxU" ? 1 : 0);
+        const int ifstrslet = (it.second.ker_name == "Stokes2D-DxU" ? 1 : 0);
+        const int ifppreg = 0;
+        const int ifppregtarg = 1;
+        const double eps = std::pow(10.0, -(double)digits_);
+
+        std::vector<double> source(2 * Ns), targ(2 * Nt), stoklet(2 * Ns, 0.0),
+            strslet(2 * Ns, 0.0), strsvec(2 * Ns, 0.0);
+        for (Long i = 0; i < Ns * 2; i++) {
+          source[i] = src_data.X[i];
+          if (ifstoklet) stoklet[i] = src_data.F[i];
+          if (ifstrslet) strslet[i] = src_data.F[i];
+        }
+        for (Long i = 0; i < Nt * 2; i++) targ[i] = Xt[i];
+        if (ifstrslet) {
+          for (Long i = 0; i < Ns * 2; i++) strsvec[i] = src_data.Xn[i];
+        }
+
+        std::vector<double> pot(2 * Ns, 0.0), pre(Ns, 0.0), grad(4 * Ns, 0.0),
+            pottarg(2 * Nt, 0.0), pretarg(Nt, 0.0), gradtarg(4 * Nt, 0.0);
+
+        int ier = 0;
+        int nd_ = nd, nsource_ = nsource, ntarg_ = ntarg;
+        int ifstoklet_ = ifstoklet, ifstrslet_ = ifstrslet;
+        int ifppreg_ = ifppreg, ifppregtarg_ = ifppregtarg;
+        double eps_ = eps;
+        stfmm2d_(&nd_, &eps_, &nsource_, source.data(), &ifstoklet_, stoklet.data(),
+            &ifstrslet_, strslet.data(), strsvec.data(), &ifppreg_, pot.data(),
+            pre.data(), grad.data(), &ntarg_, targ.data(), &ifppregtarg_,
+            pottarg.data(), pretarg.data(), gradtarg.data(), &ier);
+
+        if (ier != 0) {
+          call_ok = false;
+          break;
+        }
+
+        const double scale = (ifstoklet ? 1.0 : -1.0) / (2.0 * const_pi<double>());
+        for (Long i = 0; i < Nt * 2; i++) Ufmm[i] += pottarg[i] * scale;
+      }
+
+      if (call_ok) {
+        if (U.Dim() != Nt * TrgDim) U.ReInit(Nt * TrgDim);
+        for (Long i = 0; i < Nt * TrgDim; i++) U[i] = (Real)Ufmm[i];
+        return;
+      }
+    }
+  }
+  #endif
 
   #ifdef SCTL_HAVE_PVFMM
   EvalPVFMM(U, trg_name);

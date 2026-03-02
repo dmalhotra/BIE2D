@@ -480,36 +480,43 @@ int main(int argc, char** argv) {
     SDC<Real> time_step(ts_order, comm);
     time_step.AdaptiveSolve(&X, dt0, T_end, X0, mobility_solve, ts_tol, &monitor_callback, true);
   } else {
-    //if (ts_order == 1) { // non-adaptive, first-order time-stepping
-    //  Real dt = dt0;
-    //  Vector<Real> V(X.Dim());
-    //  for (Real t = 0; t < T_end; t += dt) {
-    //    const Real dt_ = std::min<Real>(dt, T_end-t);
-    //    mobility_solve(&V, X, 0, 0);
-    //    if (V.Dim()) {
-    //      X += V * dt_;
-    //      monitor_callback(t+dt_, dt_, X);
-    //    } else {
-    //      t -= dt;
-    //      dt *= 0.5;
-    //    }
-    //  }
-    //} else if (ts_order > 1) { // non-adaptive, high-order time-stepping
-    //  Real dt = dt0;
-    //  Vector<Real> X_;
-    //  SDC<Real> time_step(ts_order, comm);
-    //  for (Real t = 0; t < T_end; t += dt) {
-    //    const Real dt_ = std::min<Real>(dt, T_end-t);
-    //    time_step(&X_, dt_, X, mobility_solve, ts_tol*dt_/T_end);
-    //    if (X_.Dim()) {
-    //      X = X_;
-    //      monitor_callback(t+dt_, dt_, X);
-    //    } else {
-    //      t -= dt;
-    //      dt *= 0.5;
-    //    }
-    //  }
-    //} else SCTL_ASSERT(ts_order>0);
+    if (ts_order == 1) { // non-adaptive, first-order time-stepping
+      Real dt = dt0;
+      Real t_last_frame = 0;
+      Matrix<Real> V(1, X.Dim());
+      Vector<Integer> failed_flag(1);
+      Matrix<Real> X_mat(1, X.Dim(), X.begin());
+      for (Real t = 0; t < T_end; t += dt) {
+        const Real dt_ = std::min<Real>(dt, T_end-t);
+        mobility_solve(&V, &failed_flag, X_mat, 0, 0);
+        if (!failed_flag[0]) {
+          X_mat += V * dt_;
+          if (floor(t/10) > floor(t_last_frame/10)) {
+            monitor_callback(t+dt_, dt_, Vector<Real>(X.Dim(), X_mat[0], false));
+            t_last_frame = t;
+          }
+        } else {
+          t -= dt;
+          dt *= 0.5;
+        }
+      }
+    } else if (ts_order > 1) { // non-adaptive, high-order time-stepping
+      SCTL_ASSERT(false);
+      //Real dt = dt0;
+      //Vector<Real> X_;
+      //SDC<Real> time_step(ts_order, comm);
+      //for (Real t = 0; t < T_end; t += dt) {
+      //  const Real dt_ = std::min<Real>(dt, T_end-t);
+      //  time_step(&X_, dt_, X, mobility_solve, ts_tol*dt_/T_end);
+      //  if (X_.Dim()) {
+      //    X = X_;
+      //    monitor_callback(t+dt_, dt_, X);
+      //  } else {
+      //    t -= dt;
+      //    dt *= 0.5;
+      //  }
+      //}
+    } else SCTL_ASSERT(ts_order>0);
   }
 
   Comm::MPI_Finalize();

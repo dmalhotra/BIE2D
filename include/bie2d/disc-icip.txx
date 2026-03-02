@@ -899,7 +899,8 @@ namespace sctl {
         }
         return min_d;
       }();
-      std::cout<<"GMRES iterations = "<<gmres_iter<<",    Krylov-precond rank = "<<(precond?precond->Rank()-gmres_iter:0)<<",    precond-l2-err = "<<precond_l2_err<<",    precond-linf-err = "<<precond_linf_err<<",    min-dist = "<<min_dist<<'\n';
+      const Long Nunknowns = sigma_.Dim();
+      std::cout<<"GMRES iterations = "<<gmres_iter<<",    Krylov-precond rank = "<<(precond?precond->Rank()-gmres_iter:0)<<",    precond-l2-err = "<<precond_l2_err<<",    precond-linf-err = "<<precond_linf_err<<",    min-dist = "<<min_dist<<",   Nunknowns = "<<Nunknowns<<'\n';
       Profile::print();
       Profile::reset();
       Profile::Enable(prof_state);

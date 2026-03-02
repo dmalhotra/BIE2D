@@ -1,0 +1,3 @@
+[submodule "extern/fmm2d"]
+	path = extern/fmm2d
+	url = https://github.com/flatironinstitute/fmm2d.git
