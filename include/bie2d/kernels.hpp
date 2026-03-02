@@ -5,7 +5,7 @@
 
 namespace sctl {
 
-  template <Integer digits, class Real, Integer N> Vec<Real,N> approx_log(const Vec<Real,N>& x) { // TODO: vectorize
+  template <Integer digits, class Real, Integer N> static Vec<Real,N> approx_log(const Vec<Real,N>& x) { // TODO: vectorize
     //#if defined(SCTL_HAVE_SVML) || defined(SCTL_HAVE_LIBMVEC)
     return sctl::select(x==Vec<Real,N>::Zero(), Vec<Real,N>::Zero(), sctl::log(x));
     //#else
@@ -14,7 +14,7 @@ namespace sctl {
     //return logx;
     //#endif
   }
-  template <Integer digits, class Real, Integer N> Vec<Real,N> approx_inv(const Vec<Real,N>& x) { // TODO: vectorize
+  template <Integer digits, class Real, Integer N> static Vec<Real,N> approx_inv(const Vec<Real,N>& x) { // TODO: vectorize
     Vec<Real,N> xrsqrt = approx_rsqrt<digits>(x, x > Vec<Real,N>::Zero());
     return xrsqrt * xrsqrt;
   }
@@ -74,52 +74,6 @@ namespace sctl {
     }
   };
 
-  struct Stokes2D_FxU_ {
-    static const std::string& Name() {
-      static const std::string name = "Stokes2D-FxU";
-      return name;
-    }
-    static constexpr Integer FLOPS() {
-      return 16;
-    }
-    template <class Real> static constexpr Real uKerScaleFactor() {
-      return 1 / (4 * const_pi<Real>());
-    }
-    template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
-      using ScalarType = typename VecType::ScalarType;
-      const VecType r2 = r[0]*r[0]+r[1]*r[1];
-      const VecType r2inv = approx_inv<digits>(r2);
-      const VecType log_rinv = approx_log<digits>(r2) * ((ScalarType)-0.5);
-      u[0][0] = log_rinv + r[0]*r[0]*r2inv;
-      u[0][1] =            r[0]*r[1]*r2inv;
-      u[1][0] =            r[1]*r[0]*r2inv;
-      u[1][1] = log_rinv + r[1]*r[1]*r2inv;
-    }
-  };
-
-  struct Stokes2D_DxU_ {
-    static const std::string& Name() {
-      static const std::string name = "Stokes2D-DxU";
-      return name;
-    }
-    static constexpr Integer FLOPS() {
-      return 20;
-    }
-    template <class Real> static constexpr Real uKerScaleFactor() {
-      return 1 / const_pi<Real>();
-    }
-    template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
-      const VecType r2 = r[0]*r[0]+r[1]*r[1];
-      const VecType r2inv = approx_inv<digits>(r2);
-      const VecType r4inv = r2inv * r2inv;
-      const VecType r_dot_n = r[0] * n[0] + r[1] * n[1];
-      u[0][0] = r[0]*r[0]*r4inv*r_dot_n;
-      u[0][1] = r[0]*r[1]*r4inv*r_dot_n;
-      u[1][0] = r[1]*r[0]*r4inv*r_dot_n;
-      u[1][1] = r[1]*r[1]*r4inv*r_dot_n;
-    }
-  };
-
   struct Stokes2D_FxT_ {
     static const std::string& Name() {
       static const std::string name = "Stokes2D-FxdU";
@@ -150,8 +104,6 @@ namespace sctl {
   using Laplace2D_DxU = GenericKernel<Laplace2D_DxU_>;
   using Laplace2D_FxdU = GenericKernel<Laplace2D_FxdU_>;
 
-  using Stokes2D_FxU = GenericKernel<Stokes2D_FxU_>;
-  using Stokes2D_DxU = GenericKernel<Stokes2D_DxU_>;
   using Stokes2D_FxT = GenericKernel<Stokes2D_FxT_>;
 
 }

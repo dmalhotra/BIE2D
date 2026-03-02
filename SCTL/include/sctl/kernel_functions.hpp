@@ -197,6 +197,60 @@ namespace sctl {
       }
     };
 
+    template <Integer digits, class VecType> static VecType approx_log(const VecType& x) {
+      return sctl::select(x == VecType::Zero(), VecType::Zero(), sctl::log(x));
+    }
+    template <Integer digits, class VecType> static VecType approx_inv(const VecType& x) {
+      VecType xrsqrt = approx_rsqrt<digits>(x, x > VecType::Zero());
+      return xrsqrt * xrsqrt;
+    }
+
+    struct Stokes2D_FxU {
+      static const std::string& Name() {
+        static const std::string name = "Stokes2D-FxU";
+        return name;
+      }
+      static constexpr Integer FLOPS() {
+        return 16;
+      }
+      template <class Real> static constexpr Real uKerScaleFactor() {
+        return 1 / (4 * const_pi<Real>());
+      }
+      template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
+        using ScalarType = typename VecType::ScalarType;
+        const VecType r2 = r[0]*r[0]+r[1]*r[1];
+        const VecType r2inv = kernel_impl::approx_inv<digits>(r2);
+        const VecType log_rinv = kernel_impl::approx_log<digits>(r2) * ((ScalarType)-0.5);
+        u[0][0] = log_rinv + r[0]*r[0]*r2inv;
+        u[0][1] =            r[0]*r[1]*r2inv;
+        u[1][0] =            r[1]*r[0]*r2inv;
+        u[1][1] = log_rinv + r[1]*r[1]*r2inv;
+      }
+    };
+
+    struct Stokes2D_DxU {
+      static const std::string& Name() {
+        static const std::string name = "Stokes2D-DxU";
+        return name;
+      }
+      static constexpr Integer FLOPS() {
+        return 20;
+      }
+      template <class Real> static constexpr Real uKerScaleFactor() {
+        return 1 / const_pi<Real>();
+      }
+      template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[2][2], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
+        const VecType r2 = r[0]*r[0]+r[1]*r[1];
+        const VecType r2inv = kernel_impl::approx_inv<digits>(r2);
+        const VecType r4inv = r2inv * r2inv;
+        const VecType r_dot_n = r[0] * n[0] + r[1] * n[1];
+        u[0][0] = r[0]*r[0]*r4inv*r_dot_n;
+        u[0][1] = r[0]*r[1]*r4inv*r_dot_n;
+        u[1][0] = r[1]*r[0]*r4inv*r_dot_n;
+        u[1][1] = r[1]*r[1]*r4inv*r_dot_n;
+      }
+    };
+
   }  // namespace kernel_impl
 
   // Notation:
@@ -212,6 +266,9 @@ namespace sctl {
   using Stokes3D_FxT = GenericKernel<kernel_impl::Stokes3D_FxT>; // single-layer source ---> traction-tensor
   using Stokes3D_FSxU = GenericKernel<kernel_impl::Stokes3D_FSxU>; // single-layer + source/sink ---> velocity (required for FMM translations involving double-layer - M2M, M2L, M2T)
   using Stokes3D_FxUP = GenericKernel<kernel_impl::Stokes3D_FxUP>; // single-layer source ---> velocity + pressure
+
+  using Stokes2D_FxU = GenericKernel<kernel_impl::Stokes2D_FxU>;
+  using Stokes2D_DxU = GenericKernel<kernel_impl::Stokes2D_DxU>;
 
 }  // end namespace
 
