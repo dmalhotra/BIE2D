@@ -4,7 +4,7 @@ DISC_INTERP_ORDER ?= 512
 #CXX=c++ # requires g++-8 or newer / icpc (with gcc compatibility 7.5 or newer) / clang++ with llvm-10 or newer
 CXX=mpicxx -DSCTL_HAVE_MPI
 #CXX=/mnt/sw/nix/store/jrw0k2lr4i16pn5ja1rp34wzazdq7ivw-intel-oneapi-compilers-2023.0.0/compiler/2023.0.0/linux/bin/icpx
-CXXFLAGS = -std=c++11 -fopenmp -Wall -Wfloat-conversion -DDISC_INTERP_ORDER=${DISC_INTERP_ORDER} # need C++11 and OpenMP
+CXXFLAGS = -std=c++17 -fopenmp -Wall -Wfloat-conversion -DDISC_INTERP_ORDER=${DISC_INTERP_ORDER} # need C++11 and OpenMP
 
 #Optional flags
 DEBUG ?= 0

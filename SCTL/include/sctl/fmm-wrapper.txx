@@ -623,7 +623,7 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::Eval(Vector<Real>
   CheckKernelDims();
 
   #ifdef SCTL_HAVE_FMM2D
-  if (DIM == 2 && std::is_same<Real,double>::value) {
+  if constexpr (DIM == 2 && std::is_same<Real,double>::value) {
     SCTL_ASSERT_MSG(trg_map.find(trg_name) != trg_map.end(), "Target name does not exist.");
     const auto& trg_data = trg_map.at(trg_name);
     const Integer TrgDim = trg_data.dim_trg;
@@ -673,8 +673,23 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::Eval(Vector<Real>
         const int ntarg = static_cast<int>(Nt);
         const int ifstoklet = (it.second.ker_name == "Stokes2D-FxU" ? 1 : 0);
         const int ifstrslet = (it.second.ker_name == "Stokes2D-DxU" ? 1 : 0);
-        const int ifppreg = 0;
-        const int ifppregtarg = 1;
+
+        //const int ifppreg = 0;
+        //const int ifppregtarg = 1;
+        // stfmm2d expects coincident source-target evaluation through ifppreg.
+        bool eval_on_source = false;
+        if (ifstoklet && !ifstrslet && Ns == Nt) { // TODO: temporary workaround, does not handle partial overlap of sources and targets
+          eval_on_source = true;
+          for (Long i = 0; i < Ns * 2; i++) {
+            if (src_data.X[i] != Xt[i]) {
+              eval_on_source = false;
+              break;
+            }
+          }
+        }
+        const int ifppreg = eval_on_source ? 1 : 0;
+        const int ifppregtarg = eval_on_source ? 0 : 1;
+
         const double eps = std::pow(10.0, -(double)digits_);
 
         std::vector<double> source(2 * Ns), targ(2 * Nt), stoklet(2 * Ns, 0.0),
@@ -708,7 +723,11 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::Eval(Vector<Real>
         }
 
         const double scale = (ifstoklet ? 1.0 : -1.0) / (2.0 * const_pi<double>());
-        for (Long i = 0; i < Nt * 2; i++) Ufmm[i] += pottarg[i] * scale;
+        if (eval_on_source) {
+          for (Long i = 0; i < Nt * 2; i++) Ufmm[i] += pot[i] * scale;
+        } else {
+          for (Long i = 0; i < Nt * 2; i++) Ufmm[i] += pottarg[i] * scale;
+        }
       }
 
       if (call_ok) {

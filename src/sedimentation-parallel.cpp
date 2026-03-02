@@ -216,6 +216,11 @@ int main(int argc, char** argv) {
     std::cout<<"vis_path   = "<<vis_path  <<'\n';
     std::cout<<"geom_fname = "<<geom_fname<<'\n';
     std::cout<<"ksprecon   = "<<enable_ksprecon<<'\n';
+    #ifdef SCTL_HAVE_FMM2D
+    std::cout<<"FMM2D      = enabled\n";
+    #else
+    std::cout<<"FMM2D      = disabled\n";
+    #endif
   }
 
   // Initial conditions
