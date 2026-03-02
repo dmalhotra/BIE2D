@@ -17,7 +17,7 @@ namespace sctl {
     //  std::cout<<this->disc_panels.SurfCoord(i).Dim()<<'\n';
     //}
 
-    const bool exclude_near = (icip_type == ICIPType::Compress || icip_type == ICIPType::Precond);
+    const bool exclude_near = (icip_type == ICIPType::Compress || (!this->use_local_correction && icip_type == ICIPType::Precond));
     StokesDL_BIOp.Init(this->disc_panels, exclude_near, tol);
     StokesSL_BIOp.Init(this->disc_panels, false, tol);
 
@@ -182,6 +182,31 @@ namespace sctl {
   }
 
   template <class Real, Integer Order> void DiscMobility<Real,Order>::ApplyBIOpDirect(Vector<Real>* U, const Vector<Real>& sigma) const {
+    if (this->use_local_correction) {
+      SCTL_ASSERT(U);
+      U->SetZero();
+      StokesDL_BIOp.ComputePotential(*U, sigma);
+      (*U) = 0.5*sigma + (*U);
+
+      const auto apply_wts = [](Vector<Real>& sigma, const Vector<Real>& wt, const Real scal) {
+        const Long N = wt.Dim();
+        const Long dof = sigma.Dim() / N;
+        SCTL_ASSERT(sigma.Dim() == N * dof);
+        //#pragma omp parallel for schedule(static)
+        for (Long i = 0; i < N; i++) {
+          for (Long k = 0; k < dof; k++) {
+            sigma[i*dof+k] *= wt[i] * scal;
+          }
+        }
+      };
+
+      Vector<Real> sigma_ = sigma;
+      const Real inv_circumf = 1/(2*const_pi<Real>()*this->disc_panels.DiscRadius());
+      apply_wts(sigma_, this->disc_panels.SurfWts(-1), inv_circumf);
+      this->disc_wise_outer_product(*U, sigma_, Vector<Real>(), V0, V0);
+      return;
+    }
+
     static Vector<Real> sigma_near, sigma_far; // TODO: use buffers instead of static
     static Vector<Real> sigma_near_, sigma_far_;
     this->Split(&sigma_near, &sigma_far, sigma);

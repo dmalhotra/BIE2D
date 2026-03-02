@@ -141,12 +141,20 @@ template <class ValueType> void Matrix<ValueType>::Read(const char* fname) {
   }
   StaticArray<uint64_t, 2> dim_;
   Long readlen = fread(&dim_[0], sizeof(uint64_t), 2, f1);
-  SCTL_ASSERT(readlen == 2);
+  if(readlen != 2) {
+    std::cout << "Reading file failed: " << fname << '\n';
+    ReInit(0,0);
+    fclose(f1);
+    return;
+  }
 
   if (Dim(0) != (Long)dim_[0] || Dim(1) != (Long)dim_[1]) ReInit(dim_[0], dim_[1]);
   if (dim_[0] && dim_[1]) {
     readlen = fread(&data_ptr[0], sizeof(ValueType), dim_[0] * dim_[1], f1);
-    SCTL_ASSERT(readlen == (Long)(dim_[0] * dim_[1]));
+    if (readlen != (Long)(dim_[0] * dim_[1])) {
+      std::cout << "Reading file failed: " << fname << '\n';
+      ReInit(0,0);
+    }
   }
   fclose(f1);
 }
@@ -541,7 +549,7 @@ template <class ValueType> void Matrix<ValueType>::SVD(Matrix<ValueType>& tU, Ma
   mat::svd(&JOBU, &JOBVT, &m, &n, M.begin(), &m, tS.begin(), tVT.begin(), &m, tU.begin(), &k, wsbuf, &wssize, &INFO);
   aligned_delete<ValueType>(wsbuf);
 
-  if (INFO != 0) std::cout << INFO << '\n';
+  if (INFO != 0) std::cout << "SVD failed to converge: INFO = "<< INFO << '\n';
   assert(INFO == 0);
 
   for (Long i = 1; i < k; i++) {

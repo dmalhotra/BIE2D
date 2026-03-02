@@ -75,12 +75,11 @@ template <class Real> inline Real atoreal(const char* str) { // Warning: does no
   return val;
 }
 
-template <class Real> static inline constexpr Real const_pi_generic() {
-  return 113187804032455044LL*pow<-55,Real>(2) + 59412220499329904LL*pow<-112,Real>(2);
+template <class Real> static inline constexpr bool isinf_generic(const Real a) {
+  return (a==2*a && a!=0);
 }
-
-template <class Real> static inline constexpr Real const_e_generic() {
-  return 97936424237889173LL*pow<-55,Real>(2) + 30046841068362992LL*pow<-112,Real>(2);
+template <class Real> static inline constexpr bool isnan_generic(const Real a) {
+  return (a!=a);
 }
 
 template <class Real> static inline constexpr Real fabs_generic(const Real a) {
@@ -344,6 +343,16 @@ template <Long e, class ValueType> inline constexpr ValueType pow(ValueType b) {
 }
 
 template <class Real> inline std::ostream& ostream_insertion_generic(std::ostream& output, const Real q_) {
+  if (isnan(q_)) {
+    output << "nan";
+    return output;
+  }
+  if (isinf(q_)) {
+    if (q_ > 0) output << "inf";
+    else output << "-inf";
+    return output;
+  }
+
   int precision=output.precision();
 
   Real q = q_;
@@ -388,9 +397,8 @@ template <class Real> inline std::ostream& ostream_insertion_generic(std::ostrea
 
 
 #ifdef SCTL_QUAD_T
-template <> inline constexpr QuadReal const_pi<QuadReal>() { return const_pi_generic<QuadReal>(); }
-
-template <> inline constexpr QuadReal const_e<QuadReal>() { return const_e_generic<QuadReal>(); }
+template <> inline bool isinf<QuadReal>(const QuadReal a) { return isinf_generic(a); }
+template <> inline bool isnan<QuadReal>(const QuadReal a) { return isnan_generic(a); }
 
 template <> inline QuadReal fabs<QuadReal>(const QuadReal a) { return fabs_generic(a); }
 

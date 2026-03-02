@@ -21,9 +21,18 @@ namespace sctl {
     static constexpr Real d_max = 1.0; // largest distance between the discs is d_max*R
     static constexpr Real d_min = 1e-14; // smallest distance between the discs is d_min*R
 
+    static constexpr Integer IntervalCount = 7;
+    static constexpr Integer PiecewiseInterpOrder = 48;
+
+    protected:
+
+    static constexpr bool use_local_correction = true; // whether to subtract near-near block or build bio block-by-block without near-near block
+
     public:
 
     ICIP(const Comm& comm_ = Comm::Self(), const bool verbose = true);
+
+    const Comm& GetComm() const;
 
     virtual ~ICIP();
 
@@ -36,7 +45,7 @@ namespace sctl {
      *
      * @param[in] tol accuracy tolerance.
      *
-     * @param[in] icip_type adaptive, compressed or compress-precoditioned.
+     * @param[in] icip_type adaptive, compressed or compress-preconditioned.
      */
     void Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type);
 
@@ -164,6 +173,7 @@ namespace sctl {
     mutable GMRES<Real> solver; // GMRES solver
 
     StaticArray<Matrix<Real>,InterpOrder> precomp_R, precomp_Rinv;
+    Vector<Matrix<Real>> precomp_R_, precomp_Rinv_; // piecewise interpolation
     Real precomp_radius;
 
     PanelLst<Real,Order> panels_near, panels_far;

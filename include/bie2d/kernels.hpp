@@ -80,7 +80,7 @@ namespace sctl {
       return name;
     }
     static constexpr Integer FLOPS() {
-      return 0;
+      return 16;
     }
     template <class Real> static constexpr Real uKerScaleFactor() {
       return 1 / (4 * const_pi<Real>());
@@ -103,7 +103,7 @@ namespace sctl {
       return name;
     }
     static constexpr Integer FLOPS() {
-      return 0;
+      return 20;
     }
     template <class Real> static constexpr Real uKerScaleFactor() {
       return 1 / const_pi<Real>();

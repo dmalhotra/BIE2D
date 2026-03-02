@@ -32,7 +32,7 @@ namespace sctl {
      *
      * @param[in] tol accuracy tolerance.
      *
-     * @param[in] icip_type adaptive, compressed or compress-precoditioned.
+     * @param[in] icip_type adaptive, compressed or compress-preconditioned.
      */
     void Init(const Vector<Real>& Xc, const Real R, const Real tol, const ICIPType icip_type);
 
