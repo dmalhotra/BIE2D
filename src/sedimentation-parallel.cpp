@@ -275,7 +275,7 @@ int main(int argc, char** argv) {
     }
 
     if (comm.Rank()) X0.ReInit(0); // Only keep initial geometry on rank 0
-    comm.PartitionN(X0, 1);
+    comm.PartitionW(X0);
   }
 
   DiscMobility<Real,ElemOrder> disc_mobility(Comm::Self(), verbose); // DiscMobility doesn't support MPI yet
@@ -479,11 +479,28 @@ int main(int argc, char** argv) {
     idx++;
   };
 
+  if (1) { // warmup: load precomputed matrices
+    comm.Barrier();
+    Matrix<Real> V(comm.Size(), X0.Dim());
+    Vector<Integer> failed_flag(comm.Size());
+    Matrix<Real> X_mat(comm.Size(), X0.Dim());
+    for (Long i = 0; i < comm.Size(); i++) {
+      for (Long j = 0; j < X0.Dim(); j++) X_mat[i][j] = X0[j];
+    }
+    mobility_solve(&V, &failed_flag, X_mat, 0, 0);
+    ksprecon.ReInit(0);
+    ksprecon.ReInit(enable_ksprecon ? ts_order : 0);
+    comm.Barrier();
+    if (!comm.Rank()) std::cout<<"Warmup done.\n";
+    comm.Barrier();
+  }
+
   Vector<Real> X = X0;
   monitor_callback(0, dt0, X);
+  const Real tt = -omp_get_wtime();
   if (ts_adap) { // adaptive time-stepping
     SDC<Real> time_step(ts_order, comm);
-    time_step.AdaptiveSolve(&X, dt0, T_end, X0, mobility_solve, ts_tol, &monitor_callback, true);
+    time_step.AdaptiveSolve(&X, dt0, T_end, X0, mobility_solve, ts_tol, &monitor_callback, true, nullptr, true);
   } else {
     if (ts_order == 1) { // non-adaptive, first-order time-stepping
       Real dt = dt0;
@@ -496,7 +513,7 @@ int main(int argc, char** argv) {
         mobility_solve(&V, &failed_flag, X_mat, 0, 0);
         if (!failed_flag[0]) {
           X_mat += V * dt_;
-          if (floor(t/10) > floor(t_last_frame/10)) {
+          if (floor(t/1) > floor(t_last_frame/1)) {
             monitor_callback(t+dt_, dt_, Vector<Real>(X.Dim(), X_mat[0], false));
             t_last_frame = t;
           }
@@ -506,7 +523,9 @@ int main(int argc, char** argv) {
         }
       }
     } else if (ts_order > 1) { // non-adaptive, high-order time-stepping
-      SCTL_ASSERT(false);
+      SDC<Real> time_step(ts_order, comm);
+      time_step.AdaptiveSolve(&X, dt0, T_end, X0, mobility_solve, ts_tol, &monitor_callback, true, nullptr, false);
+      //SCTL_ASSERT(false);
       //Real dt = dt0;
       //Vector<Real> X_;
       //SDC<Real> time_step(ts_order, comm);
@@ -523,6 +542,7 @@ int main(int argc, char** argv) {
       //}
     } else SCTL_ASSERT(ts_order>0);
   }
+  if (!comm.Rank()) std::cout<<"Total time = "<<tt + omp_get_wtime()<<'\n';
 
   Comm::MPI_Finalize();
   return 0;

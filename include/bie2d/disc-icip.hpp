@@ -1,6 +1,10 @@
 #ifndef BIE2D_DISC_ICIP_HPP
 #define BIE2D_DISC_ICIP_HPP
 
+#ifndef DISC_ICIP_USE_LOCAL_CORRECTIONS
+#define DISC_ICIP_USE_LOCAL_CORRECTIONS 0
+#endif
+
 #include <sctl.hpp>
 #include <bie2d/disc-panel-lst.hpp>
 
@@ -26,7 +30,7 @@ namespace sctl {
 
     protected:
 
-    static constexpr bool use_local_correction = true; // whether to subtract near-near block or build bio block-by-block without near-near block
+    static constexpr bool use_local_correction = DISC_ICIP_USE_LOCAL_CORRECTIONS; // whether to subtract near-near block or build bio block-by-block without near-near block
 
     public:
 

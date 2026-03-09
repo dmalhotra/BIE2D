@@ -22,6 +22,11 @@ else
 	CXXFLAGS += -gdwarf-4 -g -rdynamic # for stack trace -gstrict-dwarf
 endif
 
+# Use local corrections instead of building the operator block by block. This
+# is less accurate due to catastrophic cancellation but faster, FMM-able, and
+# parallelizable.
+CXXFLAGS += -DDISC_ICIP_USE_LOCAL_CORRECTIONS=1
+
 #CXXFLAGS += -DSCTL_GLOBAL_MEM_BUFF=40000 # Global memory buffer size in MB
 
 CXXFLAGS += -DSCTL_PROFILE=5 -DSCTL_VERBOSE # Enable profiling

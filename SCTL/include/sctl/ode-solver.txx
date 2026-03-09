@@ -211,7 +211,7 @@ namespace sctl {
         F(&Mf1_, &failed_flag, Matrix<Real>(batch_size,DOF,Mu[1],false), picard_iter, 1);
         for (Long i = 1; i < order; i++) { // fall back to Mf0 if evaluation fails a some sub-step
           if (failed_flag[i-1]) {
-            failed_flag_ = i;
+            if (!failed_flag_) failed_flag_ = i;
             for (Long j = 0; j < DOF; j++) {
               Mf1[i][j] = Mf0[i][j];
             }
@@ -235,7 +235,7 @@ namespace sctl {
 
           F(&f1_1, &failed_flag, u_1, picard_iter, i);
           if (failed_flag[0]) { // use previous solution if F evaluation failed
-            failed_flag_ = i;
+            if (!failed_flag_) failed_flag_ = i;
             for (Long j = 0; j < DOF; j++) {
               Mf1[i][j] = Mf0[i][j];
             }
@@ -318,7 +318,7 @@ namespace sctl {
     this->operator()(u, dt, u0, fn, tol_picard, error_interp, error_picard, iter_count, u_substep);
   }
 
-  template <class Real> Real SDC<Real>::AdaptiveSolve(Vector<Real>* u, Real dt, const Real T, const Vector<Real>& u0, const FnBatch& F, const Real tol, const MonitorFn* monitor_callback, bool continue_with_errors, Real* error) const {
+  template <class Real> Real SDC<Real>::AdaptiveSolve(Vector<Real>* u, Real dt, const Real T, const Vector<Real>& u0, const FnBatch& F, const Real tol, const MonitorFn* monitor_callback, bool continue_with_errors, Real* error, bool adaptive_step_size) const {
     const Real eps = machine_eps<Real>();
     const auto nds0 = GetNodes();
     const Long DOF = u0.Dim();
@@ -365,7 +365,7 @@ namespace sctl {
                               std::min<Real>(1.5*dt, 0.9*dt * pow<Real>(error_interp/error_interp_half, 1/(Real)(order))) : // adjust time-step size to match stagnation error
                               std::max<Real>(0.5*dt, 0.9*dt * pow<Real>((tol_*dt)   /error_interp_half, 1/(Real)(order)))); // Adjust time-step size (Quaife, Biros - JCP 2016)
       if (!comm.Rank()) std::cout<<"current dt="<<dt<<"  new dt_picard="<<dt_picard<<"  new dt_interp="<<dt_interp<<'\n'; ///////////////////////////////
-      const Real dt_new = std::min<Real>(T-t, std::min(dt_interp, dt_picard));
+      const Real dt_new = std::min<Real>(T-t, (adaptive_step_size ? std::min(dt_interp, dt_picard) : dt));
 
       { // Build u0_ for next step
         if (accept) { // extrapolate from sub-step solutions
