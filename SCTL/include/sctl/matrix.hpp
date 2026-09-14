@@ -2,6 +2,7 @@
 #define _SCTL_MATRIX_HPP_
 
 #include <ostream>                // for ostream
+#include <type_traits>            // for remove_const
 
 #include "sctl/common.hpp"        // for Long, sctl
 #include "sctl/iterator.hpp"      // for Iterator, ConstIterator
@@ -20,8 +21,11 @@ template <class ValueType> class Permutation;
  * @tparam ValueType The type of elements stored in the matrix.
  */
 template <class ValueType> class Matrix {
+
+  template <class T> friend class Matrix;
+
  public:
-  typedef ValueType value_type; ///< Type of elements stored in the matrix.
+  typedef typename std::remove_const<ValueType>::type value_type; ///< Type of elements stored in the matrix, without const.
   typedef ValueType& reference; ///< Reference to a value in the matrix.
   typedef const ValueType& const_reference; ///< Const reference to a value in the matrix.
   typedef Iterator<ValueType> iterator; ///< Iterator over the elements of the matrix.
@@ -52,12 +56,20 @@ template <class ValueType> class Matrix {
   Matrix(const Matrix<ValueType>& M);
 
   /**
+   * Move constructor. Steals ownership from `M`; leaves `M` empty
+   * (`Dim(0) == 0`, `Dim(1) == 0`) and in a valid destructible state.
+   */
+  Matrix(Matrix<ValueType>&& M) noexcept;
+
+  /**
    * Destructor.
    */
   ~Matrix();
 
   /**
-   * Swaps the contents of two matrices.
+   * Swap the contents of two matrices. O(1) — no elements are copied. Ownership
+   * travels with the buffer, so it is safe to swap an owning matrix with a
+   * non-owning view.
    *
    * @param M Matrix to be swapped with.
    */
@@ -109,7 +121,14 @@ template <class ValueType> class Matrix {
    * @param i Dimension index (0 for rows, 1 for columns).
    * @return Size of the matrix along the specified dimension.
    */
-  Long Dim(Long i) const;
+  [[nodiscard]] Long Dim(Long i) const noexcept;
+
+  /**
+   * Check whether the matrix owns its data (false for views of external memory).
+   *
+   * @return bool True if the matrix owns and will deallocate its data.
+   */
+  [[nodiscard]] bool OwnData() const noexcept;
 
   /**
    * Sets all elements of the matrix to zero.
@@ -121,28 +140,28 @@ template <class ValueType> class Matrix {
    *
    * @return Iterator to the beginning of the matrix.
    */
-  Iterator<ValueType> begin();
+  [[nodiscard]] Iterator<ValueType> begin();
 
   /**
    * Returns a const iterator to the beginning of the matrix.
    *
    * @return Const iterator to the beginning of the matrix.
    */
-  ConstIterator<ValueType> begin() const;
+  [[nodiscard]] ConstIterator<ValueType> begin() const;
 
   /**
    * Returns an iterator to the end of the matrix.
    *
    * @return Iterator to the end of the matrix.
    */
-  Iterator<ValueType> end();
+  [[nodiscard]] Iterator<ValueType> end();
 
   /**
    * Returns a const iterator to the end of the matrix.
    *
    * @return Const iterator to the end of the matrix.
    */
-  ConstIterator<ValueType> end() const;
+  [[nodiscard]] ConstIterator<ValueType> end() const;
 
   // Matrix-Matrix operations
 
@@ -155,12 +174,26 @@ template <class ValueType> class Matrix {
   Matrix<ValueType>& operator=(const Matrix<ValueType>& M);
 
   /**
+   * Move assignment. Swaps state with `M` when both sides own their buffers;
+   * otherwise copies `M`'s contents into `*this` (resizing as needed).
+   *
+   * @note If `*this` is a non-owning view and `M`'s shape differs, the view
+   *       binding is lost — `*this` becomes an owning matrix with a fresh
+   *       buffer. Same applies to copy-assignment.
+   */
+  Matrix<ValueType>& operator=(Matrix<ValueType>&& M) noexcept;
+
+  // The operations below read their matrix operand and do not write it, so it may be a
+  // `Matrix<T>` or a `Matrix<const T>`. Its element type is deduced rather than named, since
+  // neither of those two types converts to the other.
+
+  /**
    * Adds another matrix to this matrix element-wise.
    *
    * @param M Matrix to be added.
    * @return Reference to this matrix after addition.
    */
-  Matrix<ValueType>& operator+=(const Matrix<ValueType>& M);
+  template <class VType> Matrix<ValueType>& operator+=(const Matrix<VType>& M);
 
   /**
    * Subtracts another matrix from this matrix element-wise.
@@ -168,7 +201,7 @@ template <class ValueType> class Matrix {
    * @param M Matrix to be subtracted.
    * @return Reference to this matrix after subtraction.
    */
-  Matrix<ValueType>& operator-=(const Matrix<ValueType>& M);
+  template <class VType> Matrix<ValueType>& operator-=(const Matrix<VType>& M);
 
   /**
    * Adds another matrix to this matrix element-wise and returns the result.
@@ -176,7 +209,7 @@ template <class ValueType> class Matrix {
    * @param M2 Matrix to be added.
    * @return New matrix resulting from the addition.
    */
-  Matrix<ValueType> operator+(const Matrix<ValueType>& M2) const;
+  template <class VType> [[nodiscard]] Matrix<value_type> operator+(const Matrix<VType>& M2) const;
 
   /**
    * Subtracts another matrix from this matrix element-wise and returns the result.
@@ -184,7 +217,7 @@ template <class ValueType> class Matrix {
    * @param M2 Matrix to be subtracted.
    * @return New matrix resulting from the subtraction.
    */
-  Matrix<ValueType> operator-(const Matrix<ValueType>& M2) const;
+  template <class VType> [[nodiscard]] Matrix<value_type> operator-(const Matrix<VType>& M2) const;
 
   /**
    * Multiplies this matrix with another matrix.
@@ -192,37 +225,37 @@ template <class ValueType> class Matrix {
    * @param M Matrix to be multiplied with.
    * @return New matrix resulting from the multiplication.
    */
-  Matrix<ValueType> operator*(const Matrix<ValueType>& M) const;
+  template <class VType> [[nodiscard]] Matrix<value_type> operator*(const Matrix<VType>& M) const;
 
   /**
-   * Computes the matrix-matrix multiplication M_r = alpha * A * B + beta * M_r.
+   * Computes the matrix-matrix multiplication M_r = A * B + beta * M_r.
    *
    * @param M_r Result matrix.
    * @param A First matrix.
    * @param B Second matrix.
    * @param beta Coefficient for the existing values of M_r (default is 0.0).
    */
-  static void GEMM(Matrix<ValueType>& M_r, const Matrix<ValueType>& A, const Matrix<ValueType>& B, ValueType beta = 0.0);
+  template <class AType, class BType> static void GEMM(Matrix<ValueType>& M_r, const Matrix<AType>& A, const Matrix<BType>& B, ValueType beta = 0.0);
 
   /**
-   * Computes the matrix-matrix multiplication M_r = alpha * P * M + beta * M_r.
+   * Computes the matrix-matrix multiplication M_r = P * M + beta * M_r.
    *
    * @param M_r Result matrix.
    * @param P Permutation matrix.
    * @param M Matrix.
    * @param beta Coefficient for the existing values of M_r (default is 0.0).
    */
-  static void GEMM(Matrix<ValueType>& M_r, const Permutation<ValueType>& P, const Matrix<ValueType>& M, ValueType beta = 0.0);
+  template <class VType> static void GEMM(Matrix<ValueType>& M_r, const Permutation<ValueType>& P, const Matrix<VType>& M, ValueType beta = 0.0);
 
   /**
-   * Computes the matrix-matrix multiplication M_r = alpha * M * P + beta * M_r.
+   * Computes the matrix-matrix multiplication M_r = M * P + beta * M_r.
    *
    * @param M_r Result matrix.
    * @param M Matrix.
    * @param P Permutation matrix.
    * @param beta Coefficient for the existing values of M_r (default is 0.0).
    */
-  static void GEMM(Matrix<ValueType>& M_r, const Matrix<ValueType>& M, const Permutation<ValueType>& P, ValueType beta = 0.0);
+  template <class VType> static void GEMM(Matrix<ValueType>& M_r, const Matrix<VType>& M, const Permutation<ValueType>& P, ValueType beta = 0.0);
 
   // Matrix-Scalar operations
 
@@ -272,7 +305,7 @@ template <class ValueType> class Matrix {
    * @param s The scalar value to add.
    * @return A new matrix with the scalar added to each element.
    */
-  Matrix<ValueType> operator+(ValueType s) const;
+  [[nodiscard]] Matrix<value_type> operator+(ValueType s) const;
 
   /**
    * Subtracts a scalar value from each element of the matrix, returning a new matrix.
@@ -280,7 +313,7 @@ template <class ValueType> class Matrix {
    * @param s The scalar value to subtract.
    * @return A new matrix with the scalar subtracted from each element.
    */
-  Matrix<ValueType> operator-(ValueType s) const;
+  [[nodiscard]] Matrix<value_type> operator-(ValueType s) const;
 
   /**
    * Multiplies each element of the matrix by a scalar value, returning a new matrix.
@@ -288,7 +321,7 @@ template <class ValueType> class Matrix {
    * @param s The scalar value to multiply by.
    * @return A new matrix with each element multiplied by the scalar.
    */
-  Matrix<ValueType> operator*(ValueType s) const;
+  [[nodiscard]] Matrix<value_type> operator*(ValueType s) const;
 
   /**
    * Divides each element of the matrix by a scalar value, returning a new matrix.
@@ -296,7 +329,7 @@ template <class ValueType> class Matrix {
    * @param s The scalar value to divide by.
    * @return A new matrix with each element divided by the scalar.
    */
-  Matrix<ValueType> operator/(ValueType s) const;
+  [[nodiscard]] Matrix<value_type> operator/(ValueType s) const;
 
   // Element access
 
@@ -353,7 +386,7 @@ template <class ValueType> class Matrix {
    *
    * @return The transpose of the matrix.
    */
-  Matrix<ValueType> Transpose() const;
+  [[nodiscard]] Matrix<value_type> Transpose() const;
 
   /**
    * Computes the transpose of the given matrix and stores the result in another matrix.
@@ -361,7 +394,7 @@ template <class ValueType> class Matrix {
    * @param M_r The matrix to store the transpose in.
    * @param M The matrix to transpose.
    */
-  static void Transpose(Matrix<ValueType>& M_r, const Matrix<ValueType>& M);
+  template <class VType> static void Transpose(Matrix<ValueType>& M_r, const Matrix<VType>& M);
 
   /**
    * Computes the Singular Value Decomposition (SVD) of the matrix.
@@ -370,24 +403,29 @@ template <class ValueType> class Matrix {
    * @param tS The matrix containing the singular values.
    * @param tVT The matrix containing the right singular vectors.
    *
-   * @note Original matrix is destroyed.
+   * @warning Original matrix is destroyed.
    */
   void SVD(Matrix<ValueType>& tU, Matrix<ValueType>& tS, Matrix<ValueType>& tVT);
 
   /**
    * Computes the Moore-Penrose pseudo-inverse of the matrix.
    *
-   * @param eps The tolerance value for singular values close to zero. Defaults to -1.
+   * @param eps Relative threshold on singular values: any `sigma_i` with
+   * `sigma_i < eps * sigma_max` is treated as zero (its reciprocal is set to
+   * zero rather than `1/sigma_i`). The default value of `-1` is a sentinel
+   * for "auto-pick" and is replaced internally by `sqrt(machine_eps<ValueType>())`.
+   * Pass an explicit non-negative value to override.
    * @return The pseudo-inverse of the matrix.
    *
-   * @note Original matrix is destroyed.
+   * @warning Original matrix is destroyed.
    */
-  Matrix<ValueType> pinv(ValueType eps = -1);
+  [[nodiscard]] Matrix<ValueType> pinv(ValueType eps = -1);
 
  private:
   void Init(Long dim1, Long dim2, Iterator<ValueType> data_ = NullIterator<ValueType>(), bool own_data_ = true);
 
   StaticArray<Long, 2> dim; ///< Dimensions of the matrix.
+  Long capacity; /**< Capacity of the matrix. */
   Iterator<ValueType> data_ptr; ///< Pointer to the data of the matrix.
   bool own_data; ///< Flag indicating ownership of the data.
 };
@@ -408,7 +446,7 @@ template <class ValueType> std::ostream& operator<<(std::ostream& output, const 
  * @param M The matrix to add the scalar to.
  * @return The resulting matrix after adding the scalar.
  */
-template <class ValueType> Matrix<ValueType> operator+(ValueType s, const Matrix<ValueType>& M) { return M + s; }
+template <class ValueType> [[nodiscard]] Matrix<ValueType> operator+(ValueType s, const Matrix<ValueType>& M) { return M + s; }
 
 /**
  * Overloaded subtraction operator to subtract a matrix from a scalar value.
@@ -417,7 +455,7 @@ template <class ValueType> Matrix<ValueType> operator+(ValueType s, const Matrix
  * @param M The matrix to subtract from the scalar.
  * @return The resulting matrix after subtracting the scalar.
  */
-template <class ValueType> Matrix<ValueType> operator-(ValueType s, const Matrix<ValueType>& M) { return s + (M * -1.0); }
+template <class ValueType> [[nodiscard]] Matrix<ValueType> operator-(ValueType s, const Matrix<ValueType>& M) { return s + (M * -1.0); }
 
 /**
  * Overloaded multiplication operator to multiply a scalar value with each element of the matrix.
@@ -426,7 +464,7 @@ template <class ValueType> Matrix<ValueType> operator-(ValueType s, const Matrix
  * @param M The matrix to multiply the scalar with.
  * @return The resulting matrix after multiplying the scalar.
  */
-template <class ValueType> Matrix<ValueType> operator*(ValueType s, const Matrix<ValueType>& M) { return M * s; }
+template <class ValueType> [[nodiscard]] Matrix<ValueType> operator*(ValueType s, const Matrix<ValueType>& M) { return M * s; }
 
 }  // end namespace
 

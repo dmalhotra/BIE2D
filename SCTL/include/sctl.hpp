@@ -26,6 +26,8 @@
 #include "sctl/tensor.txx"
 
 // Tree
+#include "sctl/sort-scatter.hpp"
+#include "sctl/sort-scatter.txx"
 #include "sctl/tree.hpp"
 #include "sctl/tree.txx"
 #include "sctl/vtudata.hpp"
@@ -38,6 +40,8 @@
 // Memory Manager, Iterators
 #include "sctl/mem_mgr.hpp"
 #include "sctl/mem_mgr.txx"
+#include "sctl/scratch_pool.hpp"
+#include "sctl/scratch_pool.txx"
 #include "sctl/iterator.hpp"
 #include "sctl/iterator.txx"
 #include "sctl/static-array.hpp"
@@ -60,7 +64,6 @@
 // Template vector intrinsics (new)
 #include "sctl/vec.hpp"
 #include "sctl/vec.txx"
-#include "sctl/vec-test.hpp"
 #include "sctl/vec-test.hpp"
 #include "sctl/intrin-wrapper.hpp"
 
@@ -85,15 +88,15 @@
 
 #include "sctl/fft_wrapper.hpp"
 #include "sctl/fft_wrapper.txx"
-#include "sctl/complex.hpp"
-#include "sctl/complex.txx"
 
 // Profiler
 #include "sctl/profile.hpp"
 #include "sctl/profile.txx"
 
-// Print stack trace
+// Print stack trace (only on POSIX targets that provide <execinfo.h>; opt-in via SCTL_SIG_HANDLER)
+#ifdef SCTL_SIG_HANDLER
 #include "sctl/stacktrace.h"
+#endif
 
 // Boundary quadrature, Kernel functions
 #include "sctl/generic-kernel.hpp"

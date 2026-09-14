@@ -25,14 +25,14 @@ SCTL: Scientific Computing Template Library
 Requirements
 ------------
 
-The only requirement to use SCTL is a working C++11 compliant compiler with OpenMP 4.0 support. It has been tested with GCC-9 and newer.
+The only requirement to use SCTL is a working C++17 compliant compiler with OpenMP 4.0 support. It has been tested with GCC-9 and newer.
 
 Getting Started
 ---------------
 
 .. note::
 
-    SCTL requires a C++11 compliant compiler with OpenMP 4.0 support.
+    SCTL requires a C++17 compliant compiler with OpenMP 4.0 support.
 
 To get started, download the latest version of SCTL from the `SCTL GitHub <https://github.com/dmalhotra/SCTL>`_.
 
@@ -72,8 +72,11 @@ The following compiler flags can be used to enable or disable specific features 
 - ``-DSCTL_GLOBAL_MEM_BUFF=<size in MB>``: Use a :ref:`global memory buffer <mem_mgr_hpp>` for allocations.
 - ``-DSCTL_PROFILE=<level>``: Enable :ref:`profiling <profile_hpp>`.
 - ``-DSCTL_VERBOSE``: Enable verbose :ref:`profiling <profile_hpp>` output.
-- ``-DSCTL_SIG_HANDLER``: Enable :ref:`stack trace <stacktrace_h>`.
+- ``-DSCTL_SIG_HANDLER``: Enable :ref:`stack trace <stacktrace_h>`. On Linux with glibc < 2.34, link with ``-ldl`` (newer glibc has it merged into libc).
 - ``-DSCTL_QUAD_T``: Enable support for :ref:`quad-precision type <math_utils_hpp>`.
+- ``-DSCTL_MAX_DEPTH=<levels>``: Set the maximum depth of a :ref:`Morton <morton_hpp>` code, and so of a :ref:`Tree <tree_hpp>` (default 20).
+- ``-DSCTL_COMM_PTRACER``: Let :ref:`Comm <comm_hpp>` read node-local peers' buffers where the kernel would otherwise refuse; this exposes a rank's memory to the same user.
+- ``-DSCTL_COMM_NO_DIRECT``: Disable those reads, so every :ref:`Comm <comm_hpp>` exchange goes through MPI. Each :ref:`Comm <comm_hpp>` then skips finding its node group, and ``SameNode`` reports only the calling rank.
 
 Features and Capabilities
 -------------------------
@@ -95,7 +98,7 @@ The following list outlines the primary features and capabilities provided by th
   - :ref:`SDC (Spectral Deferred Correction) <tutorial-sdc>`: High-order solver for ordinary differential equations.
   - :ref:`GMRES solver, Krylov preconditioner <tutorial-gmres>`: Distributed memory GMRES solver.
   - :ref:`LagrangeInterp <tutorial-lagrange-interp>`: Polynomial interpolation and differentiation.
-  - :ref:`ChebQuadRule, LegQuadRule <quadrule_hpp>`: Clenshaw-Curtis and Gauss-Legendre quadrature rules.
+  - :ref:`ChebQuadRule, LegQuadRule <quadrule_hpp>`: Fejér (first rule) and Gauss-Legendre quadrature rules.
   - :ref:`InterpQuadRule <tutorial-interp-quadrule>`: Generating special quadrature rules.
   - :ref:`Tree, PtTree <tutorial-tree>`, :ref:`Morton <morton_hpp>`: Morton order based N-dimensional parallel tree structure.
 
@@ -135,6 +138,7 @@ The following list outlines the primary features and capabilities provided by th
   - :ref:`QuadReal, basic math functions <math_utils_hpp>`: Quad-precision type and essential mathematical functions.
   - :ref:`Iterator, ConstIterator <iterator_hpp>`, :ref:`StaticArray <static-array_hpp>`: Iterator and static array utilities.
   - :ref:`MemoryManager <mem_mgr_hpp>`: Aligned memory allocation and deallocation.
+  - :ref:`ScratchBuf, ScratchPool <scratch_pool_hpp>`: Per-thread stack allocator for short-lived buffers in hot loops.
   - :ref:`Stacktrace utility <stacktrace_h>`: Prints stack traces for debugging.
 
 ..  - :ref:`GEMM, SVD (unoptimized) <mat_utils_hpp>`: Provides basic implementations of GEMM and SVD operations.

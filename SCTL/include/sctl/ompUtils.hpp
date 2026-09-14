@@ -2,11 +2,65 @@
 #define _SCTL_OMPUTILS_HPP_
 
 #include <iterator>         // for iterator_traits
+#include <type_traits>      // for enable_if, false_type, true_type
 
-#include "sctl/common.hpp"  // for sctl
+#include "sctl/common.hpp"   // for sctl
+#include "sctl/iterator.hpp" // for Iterator, ConstIterator
 
 namespace sctl {
 namespace omp_par {
+
+/**
+ * Parallel bytewise copy over contiguous ranges (raw pointers or sctl
+ * `Iterator` / `ConstIterator`, which are bounds-checked in MEMDEBUG).
+ * Byte-wise (memcpy) semantics require contiguous, trivially-copyable storage:
+ * the value types of both iterators must match and be trivially copyable, and
+ * both ranges must be contiguous, all asserted at compile time. For
+ * element-wise copy through arbitrary iterators, use `omp_par::copy` (or plain
+ * `std::copy`).
+ *
+ * Contiguity cannot be asked of an arbitrary iterator before C++20, so a C++17 build accepts only
+ * the two named above and refuses every other iterator, `std::vector`'s among them; pass `&v[0]`
+ * for those. A C++20 build accepts any `std::contiguous_iterator`.
+ *
+ * The thread count is chosen by an empirical heuristic when `nthreads < 0`:
+ *   - bytes < 2 MB         → serial (`std::memcpy`)
+ *   - bytes >= 2 MB          → full `omp_get_max_threads()`
+ * Pass `nthreads > 0` to force a specific thread count; pass `1` to force serial.
+ * If called from inside an `omp parallel` region the heuristic forces serial.
+ *
+ * @tparam OutputIt random-access iterator over contiguous storage.
+ * @tparam InputIt  random-access iterator over contiguous storage.
+ * @param[out] dst destination iterator.
+ * @param[in]  src source iterator.
+ * @param[in]  n   number of elements (NOT bytes).
+ * @param[in]  nthreads explicit thread count, or -1 for the heuristic.
+ */
+template <class OutputIt, class InputIt> void memcpy(OutputIt dst, InputIt src, Long n, Integer nthreads = -1);
+
+/**
+ * Fault in the pages of a buffer about to be overwritten, one write per 4 KB page in parallel;
+ * otherwise the first writer takes every fault, which for an MPI receive is a single thread.
+ * Cheap when the pages are already mapped. The buffer's contents are discarded.
+ */
+template <class Iter> void prefault(Iter first, Long n, Integer nthreads = -1);
+
+/**
+ * Parallel element-wise copy over random-access iterators. Each chunk is
+ * dispatched to `std::copy`, so user `operator=` is invoked normally (safe for
+ * non-trivially-copyable T). Thread-count heuristic is identical to
+ * `omp_par::memcpy`, using `sizeof(value_type) * (last - first)` as the byte
+ * budget.
+ *
+ * @tparam InputIt  random-access input iterator.
+ * @tparam OutputIt random-access output iterator.
+ * @param[in]  first range begin.
+ * @param[in]  last  range end (one past last element).
+ * @param[out] dst   destination range begin.
+ * @param[in]  nthreads explicit thread count, or -1 for the heuristic.
+ * @return iterator past the last element written: `dst + (last - first)`.
+ */
+template <class InputIt, class OutputIt> OutputIt copy(InputIt first, InputIt last, OutputIt dst, Integer nthreads = -1);
 
 /**
  * Merges two sorted ranges into a single sorted range.
@@ -49,6 +103,52 @@ template <class T, class StrictWeakOrdering> void merge_sort(T A, T A_last, Stri
 template <class T> void merge_sort(T A, T A_last);
 
 /**
+ * Parallel sample sort. Writes the sorted output to a separate buffer B (out-of-place).
+ * Scales better than merge_sort for large records by bounding data movement (one
+ * bucket scatter + per-bucket std::sort) rather than O(log p) full-array merge passes.
+ *
+ * @param A Beginning iterator of the (unmodified) input range.
+ * @param B Beginning iterator of the output range (size N).
+ * @param N Number of elements.
+ * @param comp Functor for comparing elements.
+ */
+template <class ConstIter, class Iter, class StrictWeakOrdering> void sample_sort(ConstIter A, Iter B, Long N, StrictWeakOrdering comp);
+
+/**
+ * In-place parallel sample sort (sorts the range [A, A_last) in place using an
+ * internal scratch buffer). Drop-in replacement for merge_sort.
+ *
+ * @param A Beginning iterator of the range.
+ * @param A_last Ending iterator of the range.
+ * @param comp Functor for comparing elements.
+ */
+template <class T, class StrictWeakOrdering> void sample_sort(T A, T A_last, StrictWeakOrdering comp);
+
+/**
+ * In-place parallel sample sort using the default (operator<) ordering.
+ *
+ * @param A Beginning iterator of the range.
+ * @param A_last Ending iterator of the range.
+ */
+template <class T> void sample_sort(T A, T A_last);
+
+/**
+ * Parallel multiway merge of `nruns` sorted runs into a single sorted output. The runs are the
+ * contiguous segments [run_dsp[d], run_dsp[d+1]) of `runs` (run_dsp has nruns+1 entries, with
+ * run_dsp[0] the start offset and run_dsp[nruns] the total count); `out` (that many elements)
+ * receives their merge. Parallelized by splitting the output into per-thread contiguous chunks
+ * via sampled splitters, each thread heap-merging its chunk's sub-runs -- single pass, no extra
+ * copies, exploits the pre-sortedness (O((N/p)*log nruns) vs O((N/p)*log(N/p)) for a re-sort).
+ *
+ * @param runs Beginning iterator of the buffer holding the concatenated sorted runs.
+ * @param run_dsp Run boundary offsets into `runs` (nruns+1 entries, ascending).
+ * @param nruns Number of runs.
+ * @param out Beginning iterator of the output range (size run_dsp[nruns]).
+ * @param comp Functor for comparing elements.
+ */
+template <class ConstIter, class Iter, class StrictWeakOrdering> void multiway_merge(ConstIter runs, ConstIterator<Long> run_dsp, Long nruns, Iter out, StrictWeakOrdering comp);
+
+/**
  * Reduces the elements in a range to a single value.
  *
  * @tparam ConstIter Iterator type for the input range.
@@ -61,17 +161,123 @@ template <class T> void merge_sort(T A, T A_last);
 template <class ConstIter, class Int> typename std::iterator_traits<ConstIter>::value_type reduce(ConstIter A, Int cnt);
 
 /**
- * Performs a parallel prefix sum (scan) operation on a range.
+ * Parallel **exclusive** prefix sum with caller-supplied seed.
+ *
+ * Computes
+ *
+ *     B[0] is left untouched (must be initialised by the caller),
+ *     B[i] = B[0] + A[0] + A[1] + ... + A[i-1]   for i = 1, ..., cnt-1.
+ *
+ * Equivalently, `B[i]` is the sum of the first `i` elements of `A` shifted by
+ * the caller-supplied initial value at `B[0]`. With the conventional seed
+ * `B[0] = 0`, this is a standard exclusive prefix sum (e.g. converting a
+ * count array into a displacement array). The function **does not write**
+ * `B[0]`, so leaving it uninitialised is a bug.
+ *
+ * `A[cnt-1]` is not read; only `A[0..cnt-2]` participate. Aliasing `A` and
+ * `B` is not supported.
  *
  * @tparam ConstIter Iterator type for the input range.
  * @tparam Iter Iterator type for the output range.
  * @tparam Int Integer type for indexing.
  *
- * @param A Beginning iterator of the input range.
- * @param B Beginning iterator of the output range.
- * @param cnt Number of elements in the range.
+ * @param[in] A Beginning iterator of the input range (length `cnt`).
+ * @param[in,out] B Beginning iterator of the output range (length `cnt`); `B[0]` is read as the seed and must be initialised before the call; `B[1..cnt-1]` are written.
+ * @param[in] cnt Number of elements in each range.
  */
 template <class ConstIter, class Iter, class Int> void scan(ConstIter A, Iter B, Int cnt);
+
+/**
+ * Exclusive prefix sum that also writes the seed: sets `B[0] = seed`, then behaves exactly like
+ * `scan(A, B, cnt)`. Preferred over the 3-argument form, which leaves `B[0]` to the caller.
+ *
+ * @tparam ConstIter Iterator type for the input range.
+ * @tparam Iter Iterator type for the output range.
+ * @tparam Int Integer type for indexing.
+ *
+ * @param[in] A Beginning iterator of the input range (length `cnt`).
+ * @param[out] B Beginning iterator of the output range (length `cnt`); `B[0..cnt-1]` are written.
+ * @param[in] cnt Number of elements in each range.
+ * @param[in] seed Value written to `B[0]`; pass 0 to convert a count array to displacements.
+ */
+template <class ConstIter, class Iter, class Int> void scan(ConstIter A, Iter B, Int cnt, typename std::iterator_traits<Iter>::value_type seed);
+
+/**
+ * Out-of-place parallel duplicate removal from a sorted range: copies A[0..N) to B with each run of
+ * elements equivalent under `comp` (neither precedes the other) collapsed to its first. A and B must not alias.
+ *
+ * @tparam ConstIter Iterator type for the input range.
+ * @tparam Iter Iterator type for the output range.
+ * @tparam StrictWeakOrdering Functor type for comparing elements.
+ *
+ * @param[in] A Beginning iterator of the sorted input range (length `N`).
+ * @param[out] B Beginning iterator of the output range.
+ * @param[in] N Number of elements in the input range.
+ * @param[in] comp Functor for comparing elements.
+ * @return Number of unique elements written to `B`.
+ */
+template <class ConstIter, class Iter, class StrictWeakOrdering> Long dedup_sorted(ConstIter A, Iter B, Long N, StrictWeakOrdering comp);
+
+/**
+ * Detects types that `radix_sort` can order through the type's own integer key: a member constant
+ * `IntKeyIsExact` that is true when the 64-bit key returned by `GetIntKey()` orders values exactly
+ * as `operator<` does. `MortonCode` is the motivating case; a type without the members is simply
+ * not radix-sortable and the trait is false.
+ */
+template <class T, class = void> struct is_radix_sortable : std::false_type {};
+template <class T> struct is_radix_sortable<T, typename std::enable_if<T::IntKeyIsExact>::type> : std::true_type {};
+
+/**
+ * Parallel LSD radix sort of A[0..N) by a 64-bit key, six passes of 11-bit digits. The sort is
+ * stable, and the result agrees with `operator<` whenever the key orders elements exactly as
+ * `operator<` does (see `is_radix_sortable`). A comparison sort moves the same data through
+ * O(N log N) compares. The team is capped at one thread per four buckets' worth of elements, so a
+ * short range does not pay for threads whose histograms would cost more than their share.
+ *
+ * @tparam Iter Random-access iterator over contiguous, trivially-copyable elements.
+ * @tparam KeyFn Functor mapping an element to its `std::uint64_t` key.
+ *
+ * @param[in,out] A Beginning iterator of the range; sorted in place.
+ * @param[in] N Number of elements in the range.
+ * @param[in] key Functor returning an element's key.
+ */
+template <class Iter, class KeyFn> void radix_sort(Iter A, Long N, KeyFn key);
+
+/**
+ * Sort A[0..N) in place with the fastest sort for the element type and the team: `radix_sort`
+ * through the type's integer key when `is_radix_sortable` holds for the element type, otherwise
+ * `merge_sort` for small elements on small teams and `sample_sort` beyond that. The `comp` overload
+ * is a comparison sort under that ordering, so it never takes the radix path.
+ *
+ * @tparam Iter Random-access iterator over contiguous, trivially-copyable elements.
+ *
+ * @param[in,out] A Beginning iterator of the range; sorted in place.
+ * @param[in] N Number of elements in the range.
+ * @param[in] comp Strict weak ordering.
+ */
+template <class Iter> void sort(Iter A, Long N);
+template <class Iter, class Compare> void sort(Iter A, Long N, Compare comp);
+
+/**
+ * Sort `in[0..N)` into `out[0..N)` (no overlap), choosing the sort as the in-place `sort` does.
+ * Where the chosen sort works in place, `in` is first copied to `out`; `sample_sort` writes `out`
+ * directly.
+ */
+template <class ConstIter, class Iter> void sort(ConstIter in, Iter out, Long N);
+template <class ConstIter, class Iter, class Compare> void sort(ConstIter in, Iter out, Long N, Compare comp);
+
+/**
+ * dedup_sorted using the default (operator<) ordering.
+ *
+ * @tparam ConstIter Iterator type for the input range.
+ * @tparam Iter Iterator type for the output range.
+ *
+ * @param[in] A Beginning iterator of the sorted input range (length `N`).
+ * @param[out] B Beginning iterator of the output range.
+ * @param[in] N Number of elements in the input range.
+ * @return Number of unique elements written to `B`.
+ */
+template <class ConstIter, class Iter> Long dedup_sorted(ConstIter A, Iter B, Long N);
 
 }  // end namespace omp_par
 }  // end namespace sctl

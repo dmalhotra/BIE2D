@@ -3,6 +3,7 @@
 
 #include <ostream>                // for ostream
 #include <initializer_list>       // for initializer_list
+#include <type_traits>            // for enable_if_t, is_const, remove_const
 
 #include "sctl/common.hpp"        // for Long, Integer, sctl
 #include "sctl/static-array.hpp"  // for StaticArray
@@ -23,19 +24,22 @@ namespace sctl {
    */
   template <class ValueType, bool own_data, Long... Args> class Tensor {
     public:
+      /** Element type without the const, so an operation on a read-only view yields a writable tensor. */
+      typedef typename std::remove_const<ValueType>::type value_type;
+
       /**
        * Get the order of the tensor.
        *
        * @return The order of the tensor.
        */
-      static constexpr Long Order();
+      [[nodiscard]] static constexpr Long Order();
 
       /**
        * Get the total number of elements in the tensor.
        *
        * @return The total number of elements in the tensor.
        */
-      static constexpr Long Size();
+      [[nodiscard]] static constexpr Long Size();
 
       /**
        * Get the size of a specific dimension of the tensor.
@@ -43,7 +47,7 @@ namespace sctl {
        * @tparam k The index of the dimension.
        * @return The size of the specified dimension.
        */
-      template <Long k> static constexpr Long Dim();
+      template <Long k> [[nodiscard]] static constexpr Long Dim();
 
       /**
        * A static function to test the functionality of the Tensor class.
@@ -69,9 +73,13 @@ namespace sctl {
       /**
        * Constructor initializing tensor from a const iterator.
        *
+       * For a const `ValueType` the parameter type is `Iterator<ValueType>`, so `enable_if`
+       * keeps this from redeclaring the constructor above; such a tensor reads its storage
+       * through that one.
+       *
        * @param src_iter Const iterator pointing to the beginning of data to initialize the tensor.
        */
-      explicit Tensor(ConstIterator<ValueType> src_iter);
+      template <class T = ValueType, class = std::enable_if_t<!std::is_const<T>::value>> explicit Tensor(ConstIterator<ValueType> src_iter);
 
       /**
        * Constructor with initializer list.
@@ -140,28 +148,28 @@ namespace sctl {
        *
        * @return An iterator to the beginning of the tensor.
        */
-      Iterator<ValueType> begin();
+      [[nodiscard]] Iterator<ValueType> begin();
 
       /**
        * Get a const iterator to the beginning of the tensor.
        *
        * @return A const iterator to the beginning of the tensor.
        */
-      ConstIterator<ValueType> begin() const;
+      [[nodiscard]] ConstIterator<ValueType> begin() const;
 
       /**
        * Get an iterator to the end of the tensor.
        *
        * @return An iterator to the end of the tensor.
        */
-      Iterator<ValueType> end();
+      [[nodiscard]] Iterator<ValueType> end();
 
       /**
        * Get a const iterator to the end of the tensor.
        *
        * @return A const iterator to the end of the tensor.
        */
-      ConstIterator<ValueType> end() const;
+      [[nodiscard]] ConstIterator<ValueType> end() const;
 
       /**
        * Access a specific element of the tensor.
@@ -189,7 +197,7 @@ namespace sctl {
        *
        * @return A new tensor with dimensions rotated to the left.
        */
-      typename TensorRotateLeftType<ValueType, true, Args...>::Value RotateLeft() const;
+      [[nodiscard]] typename TensorRotateLeftType<ValueType, true, Args...>::Value RotateLeft() const;
 
       /**
        * Returns a new tensor obtained by rotating the dimensions of the current tensor to the right.
@@ -199,21 +207,21 @@ namespace sctl {
        *
        * @return A new tensor with dimensions rotated to the right.
        */
-      typename TensorRotateRightType<ValueType, true, Args...>::Value RotateRight() const;
+      [[nodiscard]] typename TensorRotateRightType<ValueType, true, Args...>::Value RotateRight() const;
 
       /**
        * Unary positive operator.
        *
        * @return The tensor itself.
        */
-      Tensor<ValueType, true, Args...> operator+() const;
+      [[nodiscard]] Tensor<ValueType, true, Args...> operator+() const;
 
       /**
        * Unary negative operator.
        *
        * @return Negated tensor.
        */
-      Tensor<ValueType, true, Args...> operator-() const;
+      [[nodiscard]] Tensor<ValueType, true, Args...> operator-() const;
 
       /**
        * Addition operator.
@@ -221,7 +229,7 @@ namespace sctl {
        * @param s Scalar value to add to the tensor.
        * @return Result of addition.
        */
-      Tensor<ValueType, true, Args...> operator+(const ValueType &s) const;
+      [[nodiscard]] Tensor<ValueType, true, Args...> operator+(const ValueType &s) const;
 
       /**
        * Subtraction operator.
@@ -229,7 +237,7 @@ namespace sctl {
        * @param s Scalar value to subtract from the tensor.
        * @return Result of subtraction.
        */
-      Tensor<ValueType, true, Args...> operator-(const ValueType &s) const;
+      [[nodiscard]] Tensor<ValueType, true, Args...> operator-(const ValueType &s) const;
 
       /**
        * Multiplication operator.
@@ -237,7 +245,7 @@ namespace sctl {
        * @param s Scalar value to multiply the tensor by.
        * @return Result of multiplication.
        */
-      Tensor<ValueType, true, Args...> operator*(const ValueType &s) const;
+      [[nodiscard]] Tensor<ValueType, true, Args...> operator*(const ValueType &s) const;
 
       /**
        * Division operator.
@@ -245,7 +253,7 @@ namespace sctl {
        * @param s Scalar value to divide the tensor by.
        * @return Result of division.
        */
-      Tensor<ValueType, true, Args...> operator/(const ValueType &s) const;
+      [[nodiscard]] Tensor<ValueType, true, Args...> operator/(const ValueType &s) const;
 
       /**
        * Addition operator.
@@ -254,7 +262,11 @@ namespace sctl {
        * @param M2 Another tensor to add.
        * @return Result of addition.
        */
-      template <bool own_data_> Tensor<ValueType, true, Args...> operator+(const Tensor<ValueType, own_data_, Args...> &M2) const;
+      // The operations below read their tensor operand and do not write it, so it may be a
+      // `Tensor<T>` or a `Tensor<const T>`. Its element type is deduced rather than named, since
+      // neither of those two types converts to the other.
+
+      template <class VType, bool own_data_> [[nodiscard]] Tensor<value_type, true, Args...> operator+(const Tensor<VType, own_data_, Args...> &M2) const;
 
       /**
        * Subtraction operator.
@@ -263,7 +275,7 @@ namespace sctl {
        * @param M2 Another tensor to subtract.
        * @return Result of subtraction.
        */
-      template <bool own_data_> Tensor<ValueType, true, Args...> operator-(const Tensor<ValueType, own_data_, Args...> &M2) const;
+      template <class VType, bool own_data_> [[nodiscard]] Tensor<value_type, true, Args...> operator-(const Tensor<VType, own_data_, Args...> &M2) const;
 
       /**
        * Multiplication operator.
@@ -276,7 +288,7 @@ namespace sctl {
        * @param M2 Another tensor to multiply.
        * @return Result of multiplication.
        */
-      template <bool own_data_, Long N1, Long N2> Tensor<ValueType, true, TensorArgExtract<0, Args...>(), N2> operator*(const Tensor<ValueType, own_data_, N1, N2> &M2) const;
+      template <class VType, bool own_data_, Long N1, Long N2> [[nodiscard]] Tensor<value_type, true, TensorArgExtract<0, Args...>(), N2> operator*(const Tensor<VType, own_data_, N1, N2> &M2) const;
 
     private:
 
@@ -286,7 +298,9 @@ namespace sctl {
 
       void Init(Iterator<ValueType> src_iter);
 
-      StaticArray<ValueType, own_data ? Size() : 0> buff;
+      // Not `ValueType`: a `Tensor<const T>` is a non-owning view, and this array, empty for one,
+      // cannot be declared const without an initializer.
+      StaticArray<typename std::remove_const<ValueType>::type, own_data ? Size() : 0> buff;
       StaticArray<Iterator<ValueType>, own_data ? 0 : 1> iter_;
   };
 

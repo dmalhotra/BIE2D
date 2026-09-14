@@ -1,15 +1,13 @@
 #ifndef _SCTL_FFT_WRAPPER_HPP_
 #define _SCTL_FFT_WRAPPER_HPP_
 
+#include <complex>                // for complex
+
 #include "sctl/common.hpp"        // for Long, Integer, sctl
-#include "sctl/complex.hpp"       // for Complex
 #include "sctl/static-array.hpp"  // for StaticArray
 
-#if defined(SCTL_HAVE_FFTW) || defined(SCTL_HAVE_FFTWF)
+#if defined(SCTL_HAVE_FFTW) || defined(SCTL_HAVE_FFTWF) || defined(SCTL_HAVE_FFTWL)
 #include <fftw3.h>
-#ifdef SCTL_FFTW3_MKL
-#include <fftw3_mkl.h>
-#endif
 #endif
 
 namespace sctl {
@@ -20,6 +18,17 @@ namespace sctl {
 
   /**
    * Enum class representing different types of FFT transformations.
+   *
+   * Sign convention and normalization (N = product of `dim_vec` entries):
+   *
+   * - Forward transforms (`R2C`, `C2C`):
+   *   \f[ X_k = \sum_{n=0}^{N-1} x_n \, e^{-2\pi i \, k n / N} \f]
+   *
+   * - Inverse transforms (`C2C_INV`, `C2R`):
+   *   \f[ x_n = \sum_{k=0}^{N-1} X_k \, e^{+2\pi i \, k n / N} \f]
+   *
+   * UNNORMALIZED (raw FFTW): no scaling either way, so forward followed by
+   * inverse returns the input times N. The caller applies any scaling.
    */
   enum class FFT_Type {R2C, C2C, C2C_INV, C2R};
 
@@ -33,7 +42,7 @@ namespace sctl {
    * @tparam ValueType The value type of the FFT data.
    */
   template <class ValueType> class FFT {
-    typedef Complex<ValueType> ComplexType;
+    typedef std::complex<ValueType> ComplexType;
 
     public:
 
@@ -41,9 +50,16 @@ namespace sctl {
 
     ~FFT();
 
-    // Delete copy constructor and assignment operator to prevent copying FFT objects
+    /// Deleted: an FFT owns a non-copyable transform plan.
     FFT (const FFT&) = delete;
     FFT& operator= (const FFT&) = delete;
+
+    /// Move constructor. Takes over `other`'s transform plan, leaving it empty.
+    FFT (FFT&& other) noexcept;
+
+    /// Move assignment. Takes over `other`'s transform plan and releases the
+    /// plan currently held.
+    FFT& operator= (FFT&& other) noexcept;
 
     /**
      * Dimensions of the input and output array are given by Dim(0) and Dim(1) respectively.
@@ -66,13 +82,28 @@ namespace sctl {
     void Setup(FFT_Type fft_type, Long howmany, const Vector<Long>& dim_vec, Integer Nthreads = 1);
 
     /**
-     * Execute the FFT transform.
+     * Execute the transform, preserving `in` (multi-D C2R may cost a copy).
+     *
+     * @param[in] in the input data vector.
+     *
+     * @param[out] out the output data vector.
+     *
+     * @note FFTW build: `in`/`out` must match the plan's alignment
+     * (`SCTL_MEM_ALIGN`): a default `Vector` qualifies, a sub-view only if its
+     * offset preserves it.  Misaligned buffers trip an assert (else crash);
+     * the Cooley-Tukey fallback has none.
+     */
+    void Execute(const Vector<ValueType>& in, Vector<ValueType>& out) const;
+
+    /**
+     * Execute the transform; `in` MAY be overwritten (fast default). Pass
+     * `preserve_input = true` to keep it. Alignment rules as above.
      *
      * @param[in] in the input data vector.
      *
      * @param[out] out the output data vector.
      */
-    void Execute(const Vector<ValueType>& in, Vector<ValueType>& out) const;
+    void Execute(Vector<ValueType>& in, Vector<ValueType>& out, bool preserve_input = false) const;
 
     /**
      * Test the FFT implementation.
@@ -81,10 +112,17 @@ namespace sctl {
 
     private:
 
-    //static void check_align(const Vector<ValueType>& in, const Vector<ValueType>& out);
+    /// Swap all state with `other`; backs the move operations.
+    void Swap(FFT& other) noexcept;
 
-    FFTPlan<ValueType> plan;
-    bool copy_input;
+    /// Shared body; preserve_input keeps `in` (via plan_preserve or a scratch copy).
+    /// Not const-correct: writes `in` only when preserve_input==false, which only the
+    /// non-const Execute overload passes -- so the const_cast never mutates a const object.
+    void ExecuteImpl(const Vector<ValueType>& in, Vector<ValueType>& out, bool preserve_input) const;
+
+    FFTPlan<ValueType> plan;          // destroy-input plan (fast)
+    FFTPlan<ValueType> plan_preserve; // preserve-input plan; null for multi-D C2R
+    Integer align_in, align_out; // plan alignment; Execute asserts in/out match
 
     StaticArray<Long,2> dim; // operator dimensions
     FFT_Type fft_type; // type of FFT transform

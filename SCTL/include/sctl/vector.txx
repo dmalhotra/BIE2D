@@ -9,13 +9,15 @@
 #include <initializer_list>       // for initializer_list
 #include <iomanip>                // for operator<<, setiosflags, setprecision
 #include <iostream>               // for basic_ostream, char_traits, operator<<
+#include <type_traits>            // for is_const
 #include <vector>                 // for vector
 
 #include "sctl/common.hpp"        // for Long, SCTL_ASSERT, sctl
 #include "sctl/vector.hpp"        // for Vector, operator*, operator+, opera...
 #include "sctl/iterator.hpp"      // for Iterator, ConstIterator
-#include "sctl/iterator.txx"      // for NullIterator, memcopy, Ptr2Itr, Ptr...
+#include "sctl/iterator.txx"      // for NullIterator, Ptr2Itr, Ptr2ConstItr
 #include "sctl/mem_mgr.txx"       // for aligned_delete, aligned_new
+#include "sctl/ompUtils.txx"      // for omp_par::copy
 #include "sctl/profile.hpp"       // for Profile, ProfileCounter
 #include "sctl/profile.txx"       // for Profile::IncrementCounter
 #include "sctl/static-array.hpp"  // for StaticArray
@@ -23,15 +25,22 @@
 
 namespace sctl {
 
-template <class ValueType> void Vector<ValueType>::Init(Long dim_, Iterator<ValueType> data_, bool own_data_) {
+template <class ValueType> void Vector<ValueType>::Init(Long dim_, Iterator<ValueType> data_, bool own_data_, bool disable_reinit) {
   dim = dim_;
   capacity = dim;
   own_data = own_data_;
+  disable_reinit_ = disable_reinit;
   if (own_data) {
-    if (dim > 0) {
+    // Checked before the allocation, not after: storage a Vector<const T> owns is storage nothing
+    // can ever write, so taking it and then rejecting the copy leaves the elements as the allocator
+    // left them. This also keeps aligned_new<const T> from being instantiated at all.
+    if constexpr (std::is_const<ValueType>::value) {  // Vector<const T> is a view
+      SCTL_ASSERT_MSG(dim == 0, "Vector<const T> cannot own storage; use a non-owning view.");
+      data_ptr = NullIterator<ValueType>();
+    } else if (dim > 0) {
       data_ptr = aligned_new<ValueType>(capacity);
       if (data_ != NullIterator<ValueType>()) {
-        memcopy(data_ptr, data_, dim);
+        omp_par::copy(data_, data_ + dim, data_ptr);
       }
     } else
       data_ptr = NullIterator<ValueType>();
@@ -43,12 +52,21 @@ template <class ValueType> Vector<ValueType>::Vector() {
   Init(0);
 }
 
-template <class ValueType> Vector<ValueType>::Vector(Long dim_, Iterator<ValueType> data_, bool own_data_) {
-  Init(dim_, data_, own_data_);
+template <class ValueType> Vector<ValueType>::Vector(Long dim_, Iterator<ValueType> data_, bool own_data_, bool disable_reinit) {
+  Init(dim_, data_, own_data_, disable_reinit);
 }
 
 template <class ValueType> Vector<ValueType>::Vector(const Vector<ValueType>& V) {
+  static_assert(!std::is_const<ValueType>::value, "Vector<const T> is a view; copy the elements into a Vector<T> instead");
   Init(V.Dim(), (Iterator<ValueType>)V.begin());
+}
+
+template <class ValueType> Vector<ValueType>::Vector(Vector<ValueType>&& V) noexcept {
+  SCTL_ASSERT_MSG(!V.disable_reinit_,
+    "Cannot move-construct from a fixed-size Vector; use it by reference, "
+    "or copy its elements into a fresh owning Vector.");
+  Init(0);
+  this->Swap(V);
 }
 
 template <class ValueType> Vector<ValueType>::Vector(const std::vector<ValueType>& V) {
@@ -71,6 +89,8 @@ template <class ValueType> Vector<ValueType>::~Vector() {
 }
 
 template <class ValueType> void Vector<ValueType>::Swap(Vector<ValueType>& v1) {
+  SCTL_ASSERT_MSG(!disable_reinit_ && !v1.disable_reinit_,
+    "Cannot Swap a fixed-size Vector (e.g. a non-owning view into ScratchBuf storage).");
   Long dim_ = dim;
   Long capacity_ = capacity;
   Iterator<ValueType> data_ptr_ = data_ptr;
@@ -87,19 +107,34 @@ template <class ValueType> void Vector<ValueType>::Swap(Vector<ValueType>& v1) {
   v1.own_data = own_data_;
 }
 
-template <class ValueType> void Vector<ValueType>::ReInit(Long dim_, Iterator<ValueType> data_, bool own_data_) {
+template <class ValueType> void Vector<ValueType>::ReInit(Long dim_, Iterator<ValueType> data_, bool own_data_, bool disable_reinit) {
+  SCTL_ASSERT_MSG(!disable_reinit_,
+    "Cannot ReInit a fixed-size Vector (e.g. a non-owning view into ScratchBuf storage).");
 #ifdef SCTL_MEMDEBUG
-  Vector<ValueType> tmp(dim_, data_, own_data_);
-  this->Swap(tmp);
+  // Always destroy-and-rebuild in debug mode for stricter checking.
+  if (own_data && data_ptr != NullIterator<ValueType>()) {
+    aligned_delete(data_ptr);
+  }
+  Init(dim_, data_, own_data_, disable_reinit);
 #else
   if (own_data_ && own_data && dim_ <= capacity) {
+    // Fast path: reuse existing owned buffer when sizes fit. Setting
+    // disable_reinit_ is just a field write; no need to drop to the slow path
+    // just to mark the Vector fixed.
     dim = dim_;
-    if (dim && (data_ptr != NullIterator<ValueType>()) && (data_ != NullIterator<ValueType>())) {
-      memcopy(data_ptr, data_, dim);
+    disable_reinit_ = disable_reinit;
+    if constexpr (std::is_const<ValueType>::value) {  // Vector<const T> is a view
+      SCTL_ASSERT_MSG(dim == 0, "Vector<const T> cannot own storage; use a non-owning view.");
+    } else if (dim && (data_ptr != NullIterator<ValueType>()) && (data_ != NullIterator<ValueType>())) {
+      omp_par::copy(data_, data_ + dim, data_ptr);
     }
   } else {
-    Vector<ValueType> tmp(dim_, data_, own_data_);
-    this->Swap(tmp);
+    // Slow path: free old owned storage, then re-initialize. Avoids the
+    // tmp+Swap pattern because the new Swap rejects disable_reinit targets.
+    if (own_data && data_ptr != NullIterator<ValueType>()) {
+      aligned_delete(data_ptr);
+    }
+    Init(dim_, data_, own_data_, disable_reinit);
   }
 #endif
 }
@@ -163,9 +198,9 @@ template <class ValueType> template <class Type> void Vector<ValueType>::Read(co
   }
 }
 
-template <class ValueType> inline Long Vector<ValueType>::Dim() const { return dim; }
+template <class ValueType> inline Long Vector<ValueType>::Dim() const noexcept { return dim; }
 
-//template <class ValueType> inline Long Vector<ValueType>::Capacity() const { return capacity; }
+template <class ValueType> inline bool Vector<ValueType>::OwnData() const noexcept { return own_data; }
 
 template <class ValueType> void Vector<ValueType>::SetZero() {
   if (dim > 0) memset<ValueType>(data_ptr, 0, dim);
@@ -189,7 +224,7 @@ template <class ValueType> void Vector<ValueType>::PushBack(const ValueType& x) 
 //#else
     Vector<ValueType> v((Long)(capacity * 1.6) + 1);
 //#endif
-    memcopy(v.data_ptr, data_ptr, dim);
+    omp_par::copy(data_ptr, data_ptr + dim, v.data_ptr);
     v.dim = dim;
     Swap(v);
 
@@ -215,14 +250,29 @@ template <class ValueType> inline const ValueType& Vector<ValueType>::operator[]
 
 template <class ValueType> Vector<ValueType>& Vector<ValueType>::operator=(const std::vector<ValueType>& V) {
   if (dim != (Long)V.size()) ReInit(V.size());
-  memcopy(data_ptr, Ptr2ConstItr<ValueType>(&V[0], V.size()), dim);
+  if (V.size()) omp_par::copy(Ptr2ConstItr<ValueType>(&V[0], V.size()), Ptr2ConstItr<ValueType>(&V[0], V.size()) + dim, data_ptr);
   return *this;
 }
 
 template <class ValueType> Vector<ValueType>& Vector<ValueType>::operator=(const Vector<ValueType>& V) {
+  static_assert(!std::is_const<ValueType>::value, "Vector<const T> is a view; copy the elements into a Vector<T> instead");
   if (this != &V) {
     if (dim != V.dim) ReInit(V.dim);
-    memcopy(data_ptr, V.data_ptr, dim);
+    omp_par::copy(V.data_ptr, V.data_ptr + dim, data_ptr);
+  }
+  return *this;
+}
+
+template <class ValueType> Vector<ValueType>& Vector<ValueType>::operator=(Vector<ValueType>&& V) noexcept {
+  if (this == &V) return *this;
+  if (own_data && V.own_data) {
+    // Both sides own their buffers — safe to swap; V's destructor will release
+    // our old buffer.
+    this->Swap(V);
+  } else {
+    // At least one side is a non-owning view. Falling back to copy semantics.
+    if (dim != V.dim) ReInit(V.dim);
+    omp_par::copy(V.data_ptr, V.data_ptr + dim, data_ptr);
   }
   return *this;
 }
@@ -296,6 +346,7 @@ template <class ValueType> Vector<ValueType> Vector<ValueType>::operator-() cons
 // Vector-Scalar operations
 
 template <class ValueType> template <class VType> Vector<ValueType>& Vector<ValueType>::operator=(VType s) {
+  static_assert(!std::is_const<ValueType>::value, "Vector<const T> is a view; its elements cannot be assigned");
   for (Long i = 0; i < dim; i++) data_ptr[i] = s;
   return *this;
 }

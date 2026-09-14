@@ -45,14 +45,14 @@ namespace sctl {
        *
        * @return The size of the vector.
        */
-      static constexpr Integer Size();
+      [[nodiscard]] static constexpr Integer Size();
 
       /**
        * Create a vector initialized with all elements set to zero.
        *
        * @return Zero-initialized vector.
        */
-      static inline Vec Zero();
+      [[nodiscard]] static inline Vec Zero() noexcept;
 
       /**
        * Load a scalar value into all elements of the vector.
@@ -60,7 +60,7 @@ namespace sctl {
        * @param p Pointer to the scalar value.
        * @return Vector with all elements loaded with the scalar value.
        */
-      static inline Vec Load1(ScalarType const* p);
+      [[nodiscard]] static inline Vec Load1(ScalarType const* p);
 
       /**
        * Load a vector of scalar values from unaligned memory.
@@ -68,7 +68,7 @@ namespace sctl {
        * @param p Pointer to the scalar values.
        * @return Vector loaded with the scalar values.
        */
-      static inline Vec Load(ScalarType const* p);
+      [[nodiscard]] static inline Vec Load(ScalarType const* p);
 
       /**
        * Load a vector of scalar values from aligned memory.
@@ -76,7 +76,7 @@ namespace sctl {
        * @param p Pointer to the scalar values.
        * @return Vector loaded with the scalar values from aligned memory.
        */
-      static inline Vec LoadAligned(ScalarType const* p);
+      [[nodiscard]] static inline Vec LoadAligned(ScalarType const* p);
 
       /**
        * Default constructor.
@@ -289,7 +289,6 @@ namespace sctl {
   template <class RealVec, class IntVec> inline RealVec ConvertInt2Real(const IntVec& x);
   template <class IntVec, class RealVec> inline IntVec RoundReal2Int(const RealVec& x);
   template <class MaskType> inline Vec<typename MaskType::ScalarType,MaskType::Size> convert2vec(const MaskType& a);
-  //template <class Vec1, class Vec2> friend Vec1 reinterpret(const Vec2& x);
 
 
   // Arithmetic operators
@@ -368,6 +367,23 @@ namespace sctl {
 
   template <class ValueType, Integer N> inline Vec<ValueType,N> max(const ValueType& lhs, const Vec<ValueType,N>& rhs);
   template <class ValueType, Integer N> inline Vec<ValueType,N> min(const ValueType& lhs, const Vec<ValueType,N>& rhs);
+
+  /**
+   * Transpose an NxN matrix of scalars held in N vectors, in-place. On return,
+   * element j of v[i] is the original element i of v[j].
+   *
+   * @param v The N vectors forming the rows of the matrix.
+   */
+  template <class ValueType, Integer N> inline void transpose(Vec<ValueType,N> (&v)[N]);
+
+  /**
+   * Transpose an NxN matrix of scalars held in N vectors, in-place. Same as the
+   * array overload, for vectors not held in an array.
+   *
+   * @param v0 The first row. Exactly N vectors must be given in total.
+   * @param vs The remaining N-1 rows.
+   */
+  template <class ValueType, Integer N, class ...T> inline void transpose(Vec<ValueType,N>& v0, T&... vs);
 
 
   // Special functions

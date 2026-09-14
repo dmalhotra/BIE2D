@@ -2,17 +2,30 @@
 #define _SCTL_COMM_TXX_
 
 #include <algorithm>              // for lower_bound, max, min, sort, upper_...
+#include <cstdint>                // for uint64_t
+#include <cstring>                // for memcpy
 #include <cassert>                // for assert
 #include <functional>             // for less
+#include <limits>                 // for numeric_limits
 #include <map>                    // for multimap, __map_iterator, operator==
-#include <type_traits>            // for is_trivially_copyable
+#include <numeric>                // for exclusive_scan
+#include <iterator>               // for iterator_traits
+#include <type_traits>            // for is_trivially_copyable, is_same
 #include <utility>                // for pair
+#include <vector>                 // for vector
+#ifdef __linux__
+#include <sys/prctl.h>            // for prctl
+#include <sys/uio.h>              // for process_vm_readv
+#include <unistd.h>               // for getpid
+#endif
 
 #include "sctl/common.hpp"        // for Long, Integer, SCTL_ASSERT, SCTL_UN...
 #include "sctl/comm.hpp"          // for Comm, CommOp
 #include "sctl/iterator.hpp"      // for Iterator, ConstIterator
 #include "sctl/iterator.txx"      // for Iterator::Iterator<ValueType>, Iter...
-#include "sctl/ompUtils.txx"      // for scan, merge_sort
+#include "sctl/ompUtils.txx"      // for scan, sort, memcpy, prefault
+#include "sctl/scratch_pool.hpp"  // for ScratchBuf
+#include "sctl/scratch_pool.txx"  // for ScratchBuf
 #include "sctl/static-array.hpp"  // for StaticArray
 #include "sctl/static-array.txx"  // for StaticArray::operator[], StaticArra...
 #include "sctl/vector.hpp"        // for Vector
@@ -20,7 +33,305 @@
 
 namespace sctl {
 
+namespace comm_detail {
+
+template <class IteratorType> inline void TouchBuffer(IteratorType buf, Long count) {
+  if (!count) return;
+  SCTL_UNUSED(buf[0]        );
+  SCTL_UNUSED(buf[count - 1]);
+}
+
+/** Key with its payload, ordered by the key alone; radix-sortable exactly when the key is. */
+template <class A, class B> struct SortPair {
+  static constexpr bool IntKeyIsExact = omp_par::is_radix_sortable<A>::value;
+  std::uint64_t GetIntKey() const { return key.GetIntKey(); }
+  bool operator<(const SortPair& p) const { return key < p.key; }
+  A key;
+  B data;
+};
+
+}  // namespace comm_detail
+
 #ifdef SCTL_HAVE_MPI
+static_assert(MPI_VERSION >= 3, "SCTL requires MPI_VERSION >= 3 when SCTL_HAVE_MPI is enabled");
+namespace comm_detail {
+
+#ifdef SCTL_COMM_MAX_CHUNKS
+static_assert(SCTL_COMM_MAX_CHUNKS > 0, "SCTL_COMM_MAX_CHUNKS must be positive");
+static_assert(SCTL_COMM_MAX_CHUNKS <= std::numeric_limits<int>::max(), "SCTL_COMM_MAX_CHUNKS must fit in int");
+#endif
+#ifdef SCTL_MPI_COUNT_LIMIT
+static_assert(SCTL_MPI_COUNT_LIMIT > 0, "SCTL_MPI_COUNT_LIMIT must be positive");
+static_assert(SCTL_MPI_COUNT_LIMIT <= std::numeric_limits<int>::max(), "SCTL_MPI_COUNT_LIMIT must fit in int");
+#endif
+
+constexpr Long MPIIntLimit() {
+#ifdef SCTL_MPI_COUNT_LIMIT
+  return static_cast<Long>(SCTL_MPI_COUNT_LIMIT);
+#else
+  return static_cast<Long>(std::numeric_limits<int>::max());
+#endif
+}
+
+constexpr Long MPIIntMax() {
+  return static_cast<Long>(std::numeric_limits<int>::max());
+}
+
+constexpr bool MPIHasLargeCount() {
+#if MPI_VERSION >= 4
+  return true;
+#else
+  return false;
+#endif
+}
+
+constexpr Long MPIMaxChunks() {
+#ifdef SCTL_COMM_MAX_CHUNKS
+  return static_cast<Long>(SCTL_COMM_MAX_CHUNKS);
+#else
+  return 1000;
+#endif
+}
+
+inline bool MPIIsActive() {
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (!initialized) return false;
+  int finalized = 0;
+  MPI_Finalized(&finalized);
+  return !finalized;
+}
+
+inline void WarnIfMPIInactive(const char* op_name) {
+  if (!MPIIsActive()) SCTL_WARN(std::string("MPI operation called while MPI is inactive: ") + op_name);
+}
+
+constexpr Long GCD(Long a, Long b) {
+  return b ? GCD(b, a % b) : a;
+}
+
+constexpr bool MPIFitsInt(Long value) {
+  return value >= 0 && value <= MPIIntMax();
+}
+
+inline int MPIAsInt(Long value) {
+  SCTL_ASSERT(MPIFitsInt(value));
+  return static_cast<int>(value);
+}
+
+constexpr bool MPIFitsCount(Long value) {
+  return value >= 0 && value <= MPIIntLimit();
+}
+
+inline int MPIAsCount(Long value) {
+  SCTL_ASSERT(MPIFitsCount(value));
+  return static_cast<int>(value);
+}
+
+inline MPI_Count MPIAsCountLarge(Long value) {
+  SCTL_ASSERT(value >= 0);
+  return static_cast<MPI_Count>(value);
+}
+
+inline MPI_Aint MPIAsAint(Long value) {
+  SCTL_ASSERT(value >= 0);
+  return static_cast<MPI_Aint>(value);
+}
+
+constexpr Long MPINumChunks(Long value) {
+  return value ? (value - 1) / MPIIntLimit() + 1 : 0;
+}
+
+constexpr Long MPIChunkTagBaseUnchecked(Long user_tag) {
+  return user_tag * MPIMaxChunks();
+}
+
+constexpr Long MPIChunkTagUnchecked(Long user_tag, Long chunk_idx) {
+  return MPIChunkTagBaseUnchecked(user_tag) + chunk_idx;
+}
+
+inline void TrackPointToPoint(Long request_count, Long total_bytes) {
+  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COUNT, request_count);
+  Profile::IncrementCounter(ProfileCounter::PROF_MPI_BYTES, total_bytes);
+}
+
+inline void TrackCollective(Long collective_count, Long total_bytes) {
+  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, collective_count);
+  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, total_bytes);
+}
+
+inline Long MPIChunkTagBase(Long user_tag) {
+  SCTL_ASSERT(user_tag >= 0);
+  SCTL_ASSERT(user_tag <= MPIIntMax() / MPIMaxChunks());
+  return MPIChunkTagBaseUnchecked(user_tag);
+}
+
+inline int MPIChunkTag(Long user_tag, Long chunk_idx) {
+  SCTL_ASSERT(chunk_idx >= 0);
+  SCTL_ASSERT(chunk_idx < MPIMaxChunks());
+  return MPIAsInt(MPIChunkTagUnchecked(user_tag, chunk_idx));
+}
+
+inline void AssertChunkedTagRange(Long user_tag, Long chunk_count, int mpi_tag_ub) {
+  SCTL_ASSERT(user_tag >= 0);
+  SCTL_ASSERT(chunk_count <= MPIMaxChunks());
+  SCTL_ASSERT(MPIChunkTagBase(user_tag) + MPIMaxChunks() - 1 <= static_cast<Long>(mpi_tag_ub));
+}
+
+/**
+ * The tag `Comm::Send` and `Comm::Recv` run their rendezvous on: the one the payload's first
+ * message carries, rather than the caller's tag by itself.
+ *
+ * A message wider than one MPI count goes as chunks under derived tags, so caller tag `t` owns the
+ * block `[t * MPIMaxChunks(), (t + 1) * MPIMaxChunks())`. The caller's tag by itself does not lie in
+ * its own block: `t` is chunk `t % MPIMaxChunks()` of the block belonging to caller tag
+ * `t / MPIMaxChunks()`. A chunked message of that other caller tag therefore carries the tag the
+ * rendezvous waits on, and the two match each other -- and where the sizes agree, as a two-element
+ * chunk of a `Long` payload and the rendezvous's own two words do, MPI reports nothing and the
+ * receiver reads a payload value as an address. Deriving this tag as the payload's first chunk puts
+ * the rendezvous in the block the caller's tag already owns, where the only other traffic is this
+ * same message's own chunks. Those cannot be confused with it: MPI does not reorder within one
+ * (source, tag, communicator) and both ends post in the same order.
+ *
+ * Where the implementation has large-count point-to-point, nothing is chunked and the payload is on
+ * the caller's tag itself, which is then the tag to share.
+ */
+inline int MPIRendezvousTag(Long user_tag, int mpi_tag_ub) {
+#if MPI_VERSION >= 4
+  SCTL_UNUSED(mpi_tag_ub);
+  SCTL_ASSERT(user_tag >= 0);
+  return MPIAsInt(user_tag);
+#else
+  AssertChunkedTagRange(user_tag, 1, mpi_tag_ub);
+  return MPIChunkTag(user_tag, 0);
+#endif
+}
+
+inline void MPIWaitAllBatched(MPI_Request* request, Long request_count) {
+  for (Long offset = 0; offset < request_count; offset += MPIIntMax()) {
+    const Long batch = std::min<Long>(request_count - offset, MPIIntMax());
+    const int err = MPI_Waitall(MPIAsInt(batch), request + offset, MPI_STATUSES_IGNORE);
+    SCTL_ASSERT(err == MPI_SUCCESS);
+  }
+}
+
+/** What the receiver answers with in the node-local rendezvous of `Comm::Send` / `Comm::Recv`. The
+ *  sender waits for this, so every path the receiver can leave by has to send one. */
+constexpr char kAckFallback      = 0;  // not read; both sides fall back to MPI
+constexpr char kAckRead          = 1;  // read; the sender's buffer is free
+constexpr char kAckCountMismatch = 2;  // the counts disagree; both sides stop
+
+/**
+ * Copy `bytes` out of another process on this node, in 8 MB chunks over all threads. False when the
+ * kernel refuses, which every caller answers the same way: give this exchange to MPI.
+ *
+ * Why it does not report on the refusal beyond that: the read is one-sided, so it cannot tell a
+ * block that is shorter than asked for from one that is not. Reading past the peer's block returns
+ * whatever the peer keeps next to it and succeeds, since a send buffer holds every block in one
+ * allocation; only an over-read leaving that allocation's mapping altogether fails, and then just
+ * as any other refusal. `ReadNodeBlocks` compares the two counts before reading, which is the one
+ * place both of them are known.
+ */
+inline bool ReadPeer(int pid, const void* src, void* dst, Long bytes) {
+#ifdef __linux__
+  const Long chunk = Long(8) << 20, nchunk = (bytes + chunk - 1) / chunk;
+  const auto read = [pid,src,dst,bytes](Long c) {
+    Long a = c * chunk;
+    const Long b = std::min<Long>(bytes, a + chunk);
+    while (a < b) {
+      struct iovec l = {(char*)dst + a, (size_t)(b - a)}, r = {(char*)const_cast<void*>(src) + a, (size_t)(b - a)};
+      const ssize_t n = process_vm_readv((pid_t)pid, &l, 1, &r, 1, 0);
+      if (n <= 0) return false;
+      a += n;
+    }
+    return true;
+  };
+  const Integer nt = (SCTL_IN_PARALLEL() ? 1 : (Integer)SCTL_GET_MAX_THREADS());
+  bool ok = true;
+  #pragma omp parallel for schedule(dynamic) num_threads(nt)
+  for (Long c = 0; c < nchunk; c++) {
+    if (!read(c)) {
+      #pragma omp atomic write
+      ok = false;
+    }
+  }
+  return ok;
+#else
+  SCTL_UNUSED(pid);
+  SCTL_UNUSED(src);
+  SCTL_UNUSED(dst);
+  SCTL_UNUSED(bytes);
+  return false;
+#endif
+}
+
+#ifdef SCTL_MEMDEBUG
+/**
+ * Every rank's send count for a peer, in bytes, equals that peer's receive count for it.
+ *
+ * A pair that disagrees is undefined behaviour in MPI, and what it does instead of reporting
+ * depends on which way it disagrees and on how the exchange is carried: a send shorter than the
+ * receive leaves the rest of the block as it was, and a node-local read of it would return the
+ * bytes beside it. So the direct path checks it -- the sizes are already exchanged there -- and
+ * this gives the MPI path the same answer, for the cost of one Alltoall in the builds that check.
+ */
+inline void AssertCountsAgree(ConstIterator<Long> scounts, Long sbytes_per, ConstIterator<Long> rcounts, Long rbytes_per, Integer np, MPI_Comm comm) {
+  ScratchBuf<Long> mine(np), theirs(np);
+  for (Integer i = 0; i < np; i++) mine[i] = scounts[i] * sbytes_per;
+  MPI_Alltoall(&mine[0], 1, MPI_INT64_T, &theirs[0], 1, MPI_INT64_T, comm);
+  for (Integer i = 0; i < np; i++) {
+    SCTL_ASSERT_MSG(theirs[i] == rcounts[i] * rbytes_per, "Comm: a peer sends a different number of bytes than this rank expects; the send and receive counts disagree.");
+  }
+}
+#endif
+
+/** Whether the kernel lets this process read its node peers' memory. Set once by `Comm::MPI_Init`,
+ *  which is why one answer serves every communicator: a sub-communicator's node peers are a subset
+ *  of the world's. False when `Comm::MPI_Init` was not the entry point. */
+inline bool& DirectAvailable() {
+  static bool ok = false;
+  return ok;
+}
+
+/**
+ * Ask the kernel whether this rank can read its node peers. Collective on `node_comm`.
+ *
+ * Each rank publishes the address of a word holding a value that identifies it, so a read returning
+ * that value shows it reached the intended address. Reduced, since a node's ranks must agree.
+ */
+inline bool ProbeDirectOnNode(MPI_Comm node_comm) {
+#if !defined(SCTL_COMM_NO_DIRECT) && defined(__linux__)
+  int node_size = 1, node_rank = 0;
+  MPI_Comm_size(node_comm, &node_size);
+  MPI_Comm_rank(node_comm, &node_rank);
+  if (node_size <= 1) return false;  // no peer to read, so nothing to ask
+  // Widening ptrace opens this process's address space to every process of the same user for the
+  // rest of its life, so it is a build-time decision about the machine. Without it the reads below
+  // simply fail wherever the kernel says no, and every exchange stays on MPI.
+#ifdef SCTL_COMM_PTRACER
+  prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
+  Long probe = 0x5c71 + node_rank, got = 0;
+  const Long mine[2] = {(Long)&probe, (Long)getpid()};
+  ScratchBuf<Long> peers(2 * node_size);
+  MPI_Allgather(mine, 2, MPI_INT64_T, &peers[0], 2, MPI_INT64_T, node_comm);
+  int ok = 1;
+  for (int j = 0; j < node_size && ok; j++) {
+    if (j == node_rank) continue;
+    ok = ReadPeer((int)peers[2*j+1], (const void*)peers[2*j], &got, sizeof(Long)) && (got == 0x5c71 + j);
+  }
+  MPI_Barrier(node_comm);  // every probe stays alive until all peers have read it
+  int all = 0;
+  MPI_Allreduce(&ok, &all, 1, MPI_INT, MPI_MIN, node_comm);
+  return all != 0;
+#else
+  SCTL_UNUSED(node_comm);
+  return false;
+#endif
+}
+
+}  // namespace comm_detail
+
 /**
  * An abstract class used for communicating messages using user-defined
  * datatypes. The user must implement the static member function "value()" that
@@ -30,52 +341,46 @@ namespace sctl {
 template <class Type> class Comm::CommDatatype {
  public:
   static MPI_Datatype value() {
-    static bool first = true;
-    static MPI_Datatype datatype;
-    if (first) {
-      first = false;
+    static MPI_Datatype datatype = [](){
+      MPI_Datatype datatype;
       MPI_Type_contiguous(sizeof(Type), MPI_BYTE, &datatype);
       MPI_Type_commit(&datatype);
-    }
+      Comm::RegisterDatatype(datatype);
+      return datatype;
+    }();
     return datatype;
   }
 
   static MPI_Op sum() {
-    static bool first = true;
-    static MPI_Op myop;
-
-    if (first) {
-      first = false;
+    static MPI_Op myop = [](){
+      MPI_Op myop;
       int commune = 1;
       MPI_Op_create(sum_fn, commune, &myop);
-    }
-
+      Comm::RegisterOp(myop);
+      return myop;
+    }();
     return myop;
   }
 
   static MPI_Op min() {
-    static bool first = true;
-    static MPI_Op myop;
-
-    if (first) {
-      first = false;
+    static MPI_Op myop = [](){
+      MPI_Op myop;
       int commune = 1;
       MPI_Op_create(min_fn, commune, &myop);
-    }
-
+      Comm::RegisterOp(myop);
+      return myop;
+    }();
     return myop;
   }
 
   static MPI_Op max() {
-    static bool first = true;
-    static MPI_Op myop;
-
-    if (first) {
-      first = false;
+    static MPI_Op myop = [](){
+      MPI_Op myop;
       int commune = 1;
       MPI_Op_create(max_fn, commune, &myop);
-    }
-
+      Comm::RegisterOp(myop);
+      return myop;
+    }();
     return myop;
   }
 
@@ -109,17 +414,56 @@ template <class Type> class Comm::CommDatatype {
 };
 #endif
 
+namespace comm_detail {
+
+/** The communicators `Comm::Self()` and `Comm::World()` hand out. `Comm::MPI_Finalize` releases them
+ *  while MPI is still up, which is where an `MPI_Comm` can still be given back; the destructor below
+ *  covers a program that never calls it, where `~Impl` finds MPI gone and frees only the memory. */
+inline std::vector<Comm*>& CommCache() {
+  struct Cache {
+    std::vector<Comm*> v{2, nullptr};
+    ~Cache() {
+      for (Comm* c : v) delete c;
+    }
+  };
+  static Cache cache;
+  return cache.v;
+}
+
+}  // namespace comm_detail
+
 inline void Comm::MPI_Init(int* argc, char*** argv) {
 #ifdef SCTL_HAVE_PETSC
   PetscInitialize(argc, argv, NULL, NULL);
 #elif defined(SCTL_HAVE_MPI)
   int provided;
   ::MPI_Init_thread(argc, argv, MPI_THREAD_SERIALIZED, &provided);
-  if (provided != MPI_THREAD_SERIALIZED) SCTL_WARN("MPI implementation does not support MPI_THREAD_SERIALIZED.");
+  if (provided < MPI_THREAD_SERIALIZED) SCTL_WARN("MPI implementation does not support MPI_THREAD_SERIALIZED.");
+#endif
+#if defined(SCTL_HAVE_MPI) && !defined(SCTL_COMM_NO_DIRECT)
+  { // Every rank is here, so the node group is whole and a communicator made later covers a subset
+    // of it. Skipped where the probe would answer no without asking.
+    MPI_Comm node_comm = MPI_COMM_NULL;
+    int rank = 0;
+    ::MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, &node_comm);
+    comm_detail::DirectAvailable() = comm_detail::ProbeDirectOnNode(node_comm);
+    MPI_Comm_free(&node_comm);
+  }
 #endif
 }
 
 inline void Comm::MPI_Finalize() {
+  { // while MPI is still up, so their MPI_Comm goes back rather than leaking
+    #pragma omp critical(SCTL_COMM_CACHE)
+    for (Comm*& c : comm_detail::CommCache()) {
+      delete c;
+      c = nullptr;
+    }
+  }
+#ifdef SCTL_HAVE_MPI
+  if (comm_detail::MPIIsActive()) FreeRegisteredHandles();
+#endif
 #ifdef SCTL_HAVE_PETSC
   PetscFinalize();
 #elif defined(SCTL_HAVE_MPI)
@@ -128,222 +472,518 @@ inline void Comm::MPI_Finalize() {
 }
 
 
-inline Comm::Comm() {
 #ifdef SCTL_HAVE_MPI
-  Init(MPI_COMM_SELF);
-#endif
-}
+inline Comm::Impl::Impl()
+  : mpi_rank_(0)
+  , mpi_size_(1)
+  , mpi_tag_ub_(std::numeric_limits<int>::max())
+  , mpi_comm_(MPI_COMM_NULL)
+{}
 
-inline Comm::Comm(const Comm& c) {
-#ifdef SCTL_HAVE_MPI
-  Init(c.mpi_comm_);
-#endif
-}
-
-inline Comm Comm::Self() {
-#ifdef SCTL_HAVE_MPI
-  Comm comm_self(MPI_COMM_SELF);
-  return comm_self;
-#else
-  Comm comm_self;
-  return comm_self;
-#endif
-}
-
-inline Comm Comm::World() {
-#ifdef SCTL_HAVE_MPI
-  Comm comm_world(MPI_COMM_WORLD);
-  return comm_world;
-#else
-  Comm comm_self;
-  return comm_self;
-#endif
-}
-
-inline Comm& Comm::operator=(const Comm& c) {
-#ifdef SCTL_HAVE_MPI
-  #pragma omp critical(SCTL_COMM_DUP)
-  MPI_Comm_free(&mpi_comm_);
-  Init(c.mpi_comm_);
-#endif
-  return *this;
-}
-
-inline Comm::~Comm() {
-#ifdef SCTL_HAVE_MPI
+inline Comm::Impl::~Impl() {
+  #pragma omp critical(SCTL_COMM_REQ)
   while (!req.empty()) {
     delete (Vector<MPI_Request>*)req.top();
     req.pop();
   }
+  if (comm_detail::MPIIsActive() && mpi_comm_ != MPI_COMM_NULL) {
+    #pragma omp critical(SCTL_COMM_DUP)
+    {
+      if (node_comm_ != MPI_COMM_NULL) MPI_Comm_free(&node_comm_);
+      MPI_Comm_free(&mpi_comm_);
+    }
+  }
+}
+
+inline void Comm::Impl::Init(MPI_Comm mpi_comm) {
+  comm_detail::WarnIfMPIInactive("Comm::Init");
   #pragma omp critical(SCTL_COMM_DUP)
-  MPI_Comm_free(&mpi_comm_);
+  MPI_Comm_dup(mpi_comm, &mpi_comm_);
+  MPI_Comm_rank(mpi_comm_, &mpi_rank_);
+  MPI_Comm_size(mpi_comm_, &mpi_size_);
+  int flag = 0;
+  int* tag_ub_ptr = nullptr;
+  MPI_Comm_get_attr(mpi_comm_, MPI_TAG_UB, &tag_ub_ptr, &flag);
+  mpi_tag_ub_ = (flag && tag_ub_ptr) ? *tag_ub_ptr : std::numeric_limits<int>::max();
+  InitNode();
+}
+
+inline void Comm::Impl::InitNode() {
+  // Finding the node group costs a communicator and two collectives per Comm, which a build with no
+  // use for it should not pay: SCTL_COMM_NO_DIRECT takes the node group down to this rank alone.
+  // The cost cannot be deferred to the first caller instead, since splitting the communicator is
+  // collective and the first caller need not be -- a Send to one peer would leave the others in it.
+#ifdef SCTL_COMM_NO_DIRECT
+  const bool alone = true;
+#else
+  const bool alone = (mpi_size_ == 1);  // nothing to share a node with, as Comm::Self() has
+#endif
+  if (alone) {  // this rank is its own node group, so every direct path is skipped
+    node_rank_.assign(1, mpi_rank_);
+    node_pid_.assign(1, 0);
+    direct_ = false;
+    return;
+  }
+  #pragma omp critical(SCTL_COMM_DUP)  // creating a communicator, as Init and ~Impl do
+  MPI_Comm_split_type(mpi_comm_, MPI_COMM_TYPE_SHARED, mpi_rank_, MPI_INFO_NULL, &node_comm_);
+  int node_size = 1;
+  MPI_Comm_size(node_comm_, &node_size);
+  { // this node's comm ranks and pids, by ascending comm rank so NodeIdx can bisect
+    std::vector<int> by_node(2 * node_size);
+    int mine[2] = {mpi_rank_, 0};
+#ifdef __linux__
+    mine[1] = (int)getpid();
+#endif
+    MPI_Allgather(mine, 2, MPI_INT, by_node.data(), 2, MPI_INT, node_comm_);
+    std::vector<std::pair<int,int>> peers(node_size);
+    for (int j = 0; j < node_size; j++) peers[j] = std::make_pair(by_node[2*j], by_node[2*j+1]);
+    std::sort(peers.begin(), peers.end());
+    node_rank_.resize(node_size);
+    node_pid_.resize(node_size);
+    for (int j = 0; j < node_size; j++) {
+      node_rank_[j] = peers[j].first;
+      node_pid_[j] = peers[j].second;
+    }
+  }
+  // The kernel was asked once, at Comm::MPI_Init, over the whole node -- of which this
+  // communicator's node group is a subset -- so every rank here holds the same answer.
+  direct_ = comm_detail::DirectAvailable() && node_size > 1;
+}
+#endif
+
+inline Comm::Comm() {
+#ifdef SCTL_HAVE_MPI
+  impl_ = std::make_shared<Impl>();
+  impl_->Init(MPI_COMM_SELF);
 #endif
 }
 
+inline Comm::Comm(const Comm& c) = default;
+
+inline Comm::Comm(Comm&& c) noexcept = default;
+
+inline const Comm& Comm::Self() {
+  Comm* c = nullptr;
+  #pragma omp critical(SCTL_COMM_CACHE)
+  {
+    Comm*& slot = comm_detail::CommCache()[0];
+#ifdef SCTL_HAVE_MPI
+    if (!slot) slot = new Comm(MPI_COMM_SELF);
+#else
+    if (!slot) slot = new Comm();
+#endif
+    c = slot;
+  }
+  return *c;
+}
+
+inline const Comm& Comm::World() {
+  Comm* c = nullptr;
+  #pragma omp critical(SCTL_COMM_CACHE)
+  {
+    Comm*& slot = comm_detail::CommCache()[1];
+#ifdef SCTL_HAVE_MPI
+    if (!slot) slot = new Comm(MPI_COMM_WORLD);
+#else
+    if (!slot) slot = new Comm();
+#endif
+    c = slot;
+  }
+  return *c;
+}
+
+inline Comm& Comm::operator=(const Comm& c) = default;
+
+inline Comm& Comm::operator=(Comm&& c) noexcept = default;
+
+inline Comm::~Comm() = default;
+
 inline Comm Comm::Split(Integer clr) const {
 #ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Split");
   MPI_Comm new_comm;
   #pragma omp critical(SCTL_COMM_DUP)
-  MPI_Comm_split(mpi_comm_, clr, mpi_rank_, &new_comm);
+  MPI_Comm_split(impl_->mpi_comm_, clr, impl_->mpi_rank_, &new_comm);
   Comm c(new_comm);
   #pragma omp critical(SCTL_COMM_DUP)
   MPI_Comm_free(&new_comm);
   return c;
 #else
-  Comm c;
-  return c;
+  return Comm();
 #endif
 }
 
-inline Integer Comm::Rank() const {
+inline Integer Comm::Rank() const noexcept {
 #ifdef SCTL_HAVE_MPI
-  return mpi_rank_;
+  return impl_->mpi_rank_;
 #else
   return 0;
 #endif
 }
 
-inline Integer Comm::Size() const {
+inline Integer Comm::Size() const noexcept {
 #ifdef SCTL_HAVE_MPI
-  return mpi_size_;
+  return impl_->mpi_size_;
 #else
   return 1;
 #endif
 }
 
-inline void Comm::Barrier() const {
+inline bool Comm::SameNode(Integer rank) const {
 #ifdef SCTL_HAVE_MPI
-  MPI_Barrier(mpi_comm_);
+  SCTL_ASSERT(0 <= rank && rank < impl_->mpi_size_);
+  return impl_->NodeIdx(rank) >= 0;
+#else
+  SCTL_ASSERT(rank == 0);
+  return true;  // the only rank there is, which is this one
 #endif
 }
 
-template <class SType> void* Comm::Isend(ConstIterator<SType> sbuf, Long scount, Integer dest, Integer tag) const {
+inline void Comm::Barrier() const {
+#ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Barrier");
+  MPI_Barrier(impl_->mpi_comm_);
+#endif
+}
+
+template <class SIter> Comm::Request Comm::Isend(SIter sbuf, Long scount, Integer dest, Integer tag) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+
   static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
-  if (!scount) return nullptr;
-  Vector<MPI_Request>& request = *NewReq();
-  request.ReInit(1);
-
-  SCTL_UNUSED(sbuf[0]         );
-  SCTL_UNUSED(sbuf[scount - 1]);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_BYTES, scount*sizeof(SType));
-  MPI_Isend(&sbuf[0], scount, CommDatatype<SType>::value(), dest, tag, mpi_comm_, &request[0]);
-  return &request;
+  if (!scount) return Request();
+  comm_detail::WarnIfMPIInactive("Comm::Isend");
+#if MPI_VERSION >= 4
+  Vector<MPI_Request>& request = NewReq(1);
+  comm_detail::TouchBuffer(sbuf, scount);
+  comm_detail::TrackPointToPoint(1, scount * sizeof(SType));
+  MPI_Isend_c(&sbuf[0], comm_detail::MPIAsCountLarge(scount), CommDatatype<SType>::value(), dest, tag, impl_->mpi_comm_, &request[0]);
+  return Request(&request);
+#else
+  const Long request_count = comm_detail::MPINumChunks(scount);
+  comm_detail::AssertChunkedTagRange(tag, request_count, impl_->mpi_tag_ub_);
+  Vector<MPI_Request>& request = NewReq(request_count);
+  comm_detail::TouchBuffer(sbuf, scount);
+  comm_detail::TrackPointToPoint(request_count, scount * sizeof(SType));
+  Long offset = 0;
+  for (Long i = 0; i < request_count; i++) {
+    const Long chunk = std::min<Long>(scount - offset, comm_detail::MPIIntLimit());
+    MPI_Isend(&sbuf[offset], comm_detail::MPIAsCount(chunk), CommDatatype<SType>::value(), dest, comm_detail::MPIChunkTag(tag, i), impl_->mpi_comm_, &request[i]);
+    offset += chunk;
+  }
+  return Request(&request);
+#endif
 #else
   auto it = recv_req.find(tag);
   if (it == recv_req.end()) {
     send_req.insert(std::pair<Integer, ConstIterator<char>>(tag, (ConstIterator<char>)sbuf));
   } else {
-    memcopy(it->second, (ConstIterator<char>)sbuf, scount * sizeof(SType));
+    omp_par::memcpy(it->second, (ConstIterator<char>)sbuf, scount * sizeof(SType));
     recv_req.erase(it);
   }
-  return nullptr;
+  return Request();
 #endif
 }
 
-template <class RType> void* Comm::Irecv(Iterator<RType> rbuf, Long rcount, Integer source, Integer tag) const {
+template <class SIter> Comm::Request Comm::Issend(SIter sbuf, Long scount, Integer dest, Integer tag) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+
+  static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  if (!scount) return Request();
+  comm_detail::WarnIfMPIInactive("Comm::Issend");
+#if MPI_VERSION >= 4
+  Vector<MPI_Request>& request = NewReq(1);
+  comm_detail::TouchBuffer(sbuf, scount);
+  comm_detail::TrackPointToPoint(1, scount * sizeof(SType));
+  MPI_Issend_c(&sbuf[0], comm_detail::MPIAsCountLarge(scount), CommDatatype<SType>::value(), dest, tag, impl_->mpi_comm_, &request[0]);
+  return Request(&request);
+#else
+  const Long request_count = comm_detail::MPINumChunks(scount);
+  comm_detail::AssertChunkedTagRange(tag, request_count, impl_->mpi_tag_ub_);
+  Vector<MPI_Request>& request = NewReq(request_count);
+  comm_detail::TouchBuffer(sbuf, scount);
+  comm_detail::TrackPointToPoint(request_count, scount * sizeof(SType));
+  Long offset = 0;
+  for (Long i = 0; i < request_count; i++) {
+    const Long chunk = std::min<Long>(scount - offset, comm_detail::MPIIntLimit());
+    MPI_Issend(&sbuf[offset], comm_detail::MPIAsCount(chunk), CommDatatype<SType>::value(), dest, comm_detail::MPIChunkTag(tag, i), impl_->mpi_comm_, &request[i]);
+    offset += chunk;
+  }
+  return Request(&request);
+#endif
+#else
+  // Serial fallback: identical to Isend — pair with a pending Irecv if present,
+  // otherwise stash the send buffer for a future Irecv.
+  auto it = recv_req.find(tag);
+  if (it == recv_req.end()) {
+    send_req.insert(std::pair<Integer, ConstIterator<char>>(tag, (ConstIterator<char>)sbuf));
+  } else {
+    omp_par::memcpy(it->second, (ConstIterator<char>)sbuf, scount * sizeof(SType));
+    recv_req.erase(it);
+  }
+  return Request();
+#endif
+}
+
+template <class RType> Comm::Request Comm::Irecv(Iterator<RType> rbuf, Long rcount, Integer source, Integer tag) const {
   static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
-  if (!rcount) return nullptr;
-  Vector<MPI_Request>& request = *NewReq();
-  request.ReInit(1);
-
-  SCTL_UNUSED(rbuf[0]         );
-  SCTL_UNUSED(rbuf[rcount - 1]);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_BYTES, rcount*sizeof(RType));
-  MPI_Irecv(&rbuf[0], rcount, CommDatatype<RType>::value(), source, tag, mpi_comm_, &request[0]);
-  return &request;
+  if (!rcount) return Request();
+  comm_detail::WarnIfMPIInactive("Comm::Irecv");
+#if MPI_VERSION >= 4
+  Vector<MPI_Request>& request = NewReq(1);
+  comm_detail::TouchBuffer(rbuf, rcount);
+  comm_detail::TrackPointToPoint(1, rcount * sizeof(RType));
+  MPI_Irecv_c(&rbuf[0], comm_detail::MPIAsCountLarge(rcount), CommDatatype<RType>::value(), source, tag, impl_->mpi_comm_, &request[0]);
+  return Request(&request);
+#else
+  const Long request_count = comm_detail::MPINumChunks(rcount);
+  comm_detail::AssertChunkedTagRange(tag, request_count, impl_->mpi_tag_ub_);
+  Vector<MPI_Request>& request = NewReq(request_count);
+  comm_detail::TouchBuffer(rbuf, rcount);
+  comm_detail::TrackPointToPoint(request_count, rcount * sizeof(RType));
+  Long offset = 0;
+  for (Long i = 0; i < request_count; i++) {
+    const Long chunk = std::min<Long>(rcount - offset, comm_detail::MPIIntLimit());
+    MPI_Irecv(&rbuf[offset], comm_detail::MPIAsCount(chunk), CommDatatype<RType>::value(), source, comm_detail::MPIChunkTag(tag, i), impl_->mpi_comm_, &request[i]);
+    offset += chunk;
+  }
+  return Request(&request);
+#endif
 #else
   auto it = send_req.find(tag);
   if (it == send_req.end()) {
     recv_req.insert(std::pair<Integer, Iterator<char>>(tag, (Iterator<char>)rbuf));
   } else {
-    memcopy((Iterator<char>)rbuf, it->second, rcount * sizeof(RType));
+    omp_par::memcpy((Iterator<char>)rbuf, it->second, rcount * sizeof(RType));
     send_req.erase(it);
   }
-  return nullptr;
+  return Request();
 #endif
 }
 
-inline void Comm::Wait(void* req_ptr) const {
+inline void Comm::Wait(Request req) const {
+  void* req_ptr = req.release_();
 #ifdef SCTL_HAVE_MPI
   if (req_ptr == nullptr) return;
+  comm_detail::WarnIfMPIInactive("Comm::Wait");
   Vector<MPI_Request>& request = *(Vector<MPI_Request>*)req_ptr;
   if (request.Dim()) {
-    // std::vector<MPI_Status> status(request.Dim());
-    int err = MPI_Waitall(request.Dim(), &request[0], MPI_STATUSES_IGNORE);  //&status[0]);
-    SCTL_ASSERT(err == MPI_SUCCESS);
+    comm_detail::MPIWaitAllBatched(&request[0], request.Dim());
   }
   DelReq(&request);
+#else
+  SCTL_UNUSED(req_ptr);
 #endif
 }
 
-template <class Type> void Comm::Bcast(Iterator<Type> buf, Long count, Long root) const {
+template <class Type> void Comm::Bcast(Iterator<Type> buf, Long count, Integer root) const {
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
   if (!count) return;
-  SCTL_UNUSED(buf[0]        );
-  SCTL_UNUSED(buf[count - 1]);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, count*sizeof(Type));
-  MPI_Bcast(&buf[0], count, CommDatatype<Type>::value(), root, mpi_comm_);
-#endif
-}
-
-template <class SType, class RType> void Comm::Allgather(ConstIterator<SType> sbuf, Long scount, Iterator<RType> rbuf, Long rcount) const {
-  static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
-  static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
-  if (scount) {
-    SCTL_UNUSED(sbuf[0]         );
-    SCTL_UNUSED(sbuf[scount - 1]);
-  }
-  if (rcount) {
-    SCTL_UNUSED(rbuf[0]                  );
-    SCTL_UNUSED(rbuf[rcount * Size() - 1]);
-  }
-#ifdef SCTL_HAVE_MPI
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, scount*sizeof(SType) + rcount*sizeof(RType));
-  MPI_Allgather((scount ? &sbuf[0] : nullptr), scount, CommDatatype<SType>::value(), (rcount ? &rbuf[0] : nullptr), rcount, CommDatatype<RType>::value(), mpi_comm_);
+  comm_detail::WarnIfMPIInactive("Comm::Bcast");
+  comm_detail::TouchBuffer(buf, count);
+#if MPI_VERSION >= 4
+  comm_detail::TrackCollective(1, count * sizeof(Type));
+  MPI_Bcast_c(&buf[0], comm_detail::MPIAsCountLarge(count), CommDatatype<Type>::value(), root, impl_->mpi_comm_);
 #else
-  memcopy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, scount * sizeof(SType));
+  comm_detail::TrackCollective(comm_detail::MPINumChunks(count), count * sizeof(Type));
+  for (Long offset = 0; offset < count; offset += comm_detail::MPIIntLimit()) {
+    const Long chunk = std::min<Long>(count - offset, comm_detail::MPIIntLimit());
+    MPI_Bcast(&buf[offset], comm_detail::MPIAsCount(chunk), CommDatatype<Type>::value(), root, impl_->mpi_comm_);
+  }
+#endif
 #endif
 }
 
-template <class SType, class RType> void Comm::Allgatherv(ConstIterator<SType> sbuf, Long scount, Iterator<RType> rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls) const {
+template <class SIter, class RIter> void Comm::Allgather(SIter sbuf, Long scount, RIter rbuf, Long rcount) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+  using RType = typename std::iterator_traits<RIter>::value_type;
+
+  static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
+  static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
+  comm_detail::TouchBuffer(sbuf, scount);
+  comm_detail::TouchBuffer(rbuf, rcount * Size());
+#ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Allgather");
+  comm_detail::TrackCollective(1, scount * sizeof(SType) + rcount * sizeof(RType));
+#if MPI_VERSION >= 4
+  MPI_Allgather_c((scount ? &sbuf[0] : nullptr), comm_detail::MPIAsCountLarge(scount), CommDatatype<SType>::value(), (rcount ? &rbuf[0] : nullptr), comm_detail::MPIAsCountLarge(rcount), CommDatatype<RType>::value(), impl_->mpi_comm_);
+#else
+  if (comm_detail::MPIFitsCount(scount) && comm_detail::MPIFitsCount(rcount)) {
+    MPI_Allgather((scount ? &sbuf[0] : nullptr), comm_detail::MPIAsCount(scount), CommDatatype<SType>::value(), (rcount ? &rbuf[0] : nullptr), comm_detail::MPIAsCount(rcount), CommDatatype<RType>::value(), impl_->mpi_comm_);
+  } else {
+    SCTL_ASSERT(scount * sizeof(SType) == rcount * sizeof(RType));
+    ScratchBuf<Long> rcounts_(impl_->mpi_size_), rdispls_(impl_->mpi_size_);
+    #pragma omp parallel for schedule(static)
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
+      rcounts_[i] = rcount;
+      rdispls_[i] = i * rcount;
+    }
+    Allgatherv(sbuf, scount, rbuf, rcounts_.begin(), rdispls_.begin());
+  }
+#endif
+#else
+  omp_par::memcpy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, scount * sizeof(SType));
+#endif
+}
+
+template <class SIter, class RIter> void Comm::Allgatherv(SIter sbuf, Long scount, RIter rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+  using RType = typename std::iterator_traits<RIter>::value_type;
+
   static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
   static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
-  Vector<int> rcounts_(mpi_size_), rdispls_(mpi_size_);
-  Long rcount_sum = 0;
-#pragma omp parallel for schedule(static) reduction(+ : rcount_sum)
-  for (Integer i = 0; i < mpi_size_; i++) {
-    rcounts_[i] = rcounts[i];
-    rdispls_[i] = rdispls[i];
+  comm_detail::WarnIfMPIInactive("Comm::Allgatherv");
+  Long rcount_sum = 0, recv_span = 0;
+  #pragma omp parallel for schedule(static) reduction(+ : rcount_sum) reduction(max : recv_span)
+  for (Integer i = 0; i < impl_->mpi_size_; i++) {
+    SCTL_ASSERT(rcounts[i] >= 0);
+    SCTL_ASSERT(rdispls[i] >= 0);
     rcount_sum += rcounts[i];
+    if (rcounts[i]) {
+      SCTL_UNUSED(rbuf[rdispls[i]]);
+      SCTL_UNUSED(rbuf[rdispls[i] + rcounts[i] - 1]);
+      recv_span = std::max<Long>(recv_span, rdispls[i] + rcounts[i]);
+    }
   }
-  if (scount) {
-    SCTL_UNUSED(sbuf[0]         );
-    SCTL_UNUSED(sbuf[scount - 1]);
+  comm_detail::TouchBuffer(sbuf, scount);
+  if (!rcount_sum) return;
+
+  comm_detail::TrackCollective(1, scount * sizeof(SType) + rcount_sum * sizeof(RType));
+#if MPI_VERSION >= 4
+  ScratchBuf<MPI_Count> rcounts_(impl_->mpi_size_);
+  ScratchBuf<MPI_Aint>  rdispls_(impl_->mpi_size_);
+  #pragma omp parallel for schedule(static)
+  for (Integer i = 0; i < impl_->mpi_size_; i++) {
+    rcounts_[i] = comm_detail::MPIAsCountLarge(rcounts[i]);
+    rdispls_[i] = comm_detail::MPIAsAint(rdispls[i]);
   }
-  if (rcount_sum) {
-    SCTL_UNUSED(rbuf[0]             );
-    SCTL_UNUSED(rbuf[rcount_sum - 1]);
-  }
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, scount*sizeof(SType) + rcount_sum*sizeof(RType));
-  MPI_Allgatherv((scount ? &sbuf[0] : nullptr), scount, CommDatatype<SType>::value(), (rcount_sum ? &rbuf[0] : nullptr), &rcounts_.begin()[0], &rdispls_.begin()[0], CommDatatype<RType>::value(), mpi_comm_);
+  MPI_Allgatherv_c((scount ? &sbuf[0] : nullptr), comm_detail::MPIAsCountLarge(scount), CommDatatype<SType>::value(), (recv_span ? &rbuf[0] : nullptr), &rcounts_.begin()[0], &rdispls_.begin()[0], CommDatatype<RType>::value(), impl_->mpi_comm_);
+  return;
 #else
-  memcopy((Iterator<char>)(rbuf + rdispls[0]), (ConstIterator<char>)sbuf, scount * sizeof(SType));
+  bool fits_typed = comm_detail::MPIFitsCount(recv_span);
+  if (fits_typed) {  // Keep the original typed collective path when the full placed receive range fits in int.
+    ScratchBuf<int> rcounts_(impl_->mpi_size_), rdispls_(impl_->mpi_size_);
+    #pragma omp parallel for schedule(static)
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
+      rcounts_[i] = comm_detail::MPIAsCount(rcounts[i]);
+      rdispls_[i] = comm_detail::MPIAsCount(rdispls[i]);
+    }
+    MPI_Allgatherv((scount ? &sbuf[0] : nullptr), comm_detail::MPIAsCount(scount), CommDatatype<SType>::value(), (recv_span ? &rbuf[0] : nullptr), &rcounts_.begin()[0], &rdispls_.begin()[0], CommDatatype<RType>::value(), impl_->mpi_comm_);
+    return;
+  }
+
+  const Long unit_size = comm_detail::GCD(sizeof(SType), sizeof(RType));
+  SCTL_ASSERT(unit_size > 0);
+  SCTL_ASSERT(sizeof(SType) % unit_size == 0);
+  SCTL_ASSERT(sizeof(RType) % unit_size == 0);
+  const Long send_units_scale = static_cast<Long>(sizeof(SType)) / unit_size;
+  const Long recv_units_scale = static_cast<Long>(sizeof(RType)) / unit_size;
+
+  const Long send_units = scount * send_units_scale;
+
+  // Express both sides in a shared unit so mixed send/recv types can still use MPI_Allgatherv.
+  ScratchBuf<Long> recv_counts_units(impl_->mpi_size_), recv_displs_units(impl_->mpi_size_);
+  #pragma omp parallel for schedule(static)
+  for (Integer i = 0; i < impl_->mpi_size_; i++) {
+    recv_counts_units[i] = rcounts[i] * recv_units_scale;
+    recv_displs_units[i] = rdispls[i] * recv_units_scale;
+  }
+  SCTL_ASSERT(send_units == recv_counts_units[impl_->mpi_rank_]);
+
+  MPI_Datatype unit_type = MPI_BYTE;
+  bool free_unit_type = false;
+  if (unit_size > 1) {
+    MPI_Type_contiguous(comm_detail::MPIAsInt(unit_size), MPI_BYTE, &unit_type);
+    MPI_Type_commit(&unit_type);
+    free_unit_type = true;
+  }
+
+  ConstIterator<char> sbuf_bytes = (ConstIterator<char>)sbuf;
+  Iterator<char> rbuf_bytes = (Iterator<char>)rbuf;
+  { // Batch over sorted placed receive blocks to avoid scanning empty windows in sparse layouts.
+    const Long window_limit = comm_detail::MPIIntLimit();
+
+    std::vector<std::pair<Long,Integer>> recv_order;
+    recv_order.reserve(impl_->mpi_size_);
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
+      if (recv_counts_units[i]) recv_order.push_back(std::make_pair(recv_displs_units[i], i));
+    }
+    omp_par::sample_sort(recv_order.begin(), recv_order.end());
+    const Long recv_order_size = static_cast<Long>(recv_order.size());
+    SCTL_ASSERT(recv_order_size);
+    for (Long i = 1; i < recv_order_size; i++) {
+      const Integer prev_pid = recv_order[i - 1].second;
+      const Integer curr_pid = recv_order[i].second;
+      SCTL_ASSERT(recv_displs_units[prev_pid] + recv_counts_units[prev_pid] <= recv_displs_units[curr_pid]);
+    }
+
+    ScratchBuf<int> rcounts_(impl_->mpi_size_), rdispls_(impl_->mpi_size_);
+    memset(rcounts_.begin(), 0, impl_->mpi_size_);
+    memset(rdispls_.begin(), 0, impl_->mpi_size_);
+
+    Long idx_begin = 0, window_begin = recv_order[0].first, num_windows = 0;
+    while (idx_begin < recv_order_size) {
+      Long scount_ = 0, sdispl_ = 0;
+      Long idx_end = idx_begin, window_end = window_begin;
+      for (Long j = idx_begin; j < recv_order_size; j++) {
+        const Integer pid = recv_order[j].second;
+        if (recv_displs_units[pid] < window_begin + window_limit) {
+          const Long msg_begin = std::max<Long>(window_begin, recv_displs_units[pid]);
+          const Long msg_end   = std::min<Long>(window_begin + window_limit, recv_displs_units[pid] + recv_counts_units[pid]);
+          rdispls_[pid] = msg_begin - window_begin;
+          rcounts_[pid] = msg_end - msg_begin;
+
+          if (impl_->mpi_rank_ == pid) {
+            scount_ = msg_end - msg_begin;
+            sdispl_ = msg_begin - recv_displs_units[pid];
+          }
+
+          window_end = msg_end;
+          idx_end = j;
+        } else break;
+      }
+
+      MPI_Allgatherv((scount_ ? &sbuf_bytes[sdispl_ * unit_size] : nullptr), comm_detail::MPIAsCount(scount_), unit_type, &rbuf_bytes[window_begin * unit_size], &rcounts_.begin()[0], &rdispls_.begin()[0], unit_type, impl_->mpi_comm_);
+      num_windows++;
+
+      for (Integer j = idx_begin; j <= idx_end; j++) {
+        const Integer pid = recv_order[j].second;
+        rdispls_[pid] = 0;
+        rcounts_[pid] = 0;
+      }
+      { // Set idx_begin, window_begin for next iteration
+        const Integer pid = recv_order[idx_end].second;
+        if (window_end < recv_displs_units[pid] + recv_counts_units[pid]) {
+          idx_begin = idx_end;
+          window_begin = window_end;
+        } else {
+          idx_begin = idx_end + 1;
+          if (idx_begin < recv_order_size) window_begin = recv_order[idx_begin].first;
+        }
+      }
+    }
+    comm_detail::TrackCollective(num_windows - 1, 0);
+  }
+
+  if (free_unit_type) MPI_Type_free(&unit_type);
+#endif
+#else
+  omp_par::memcpy((Iterator<char>)(rbuf + rdispls[0]), (ConstIterator<char>)sbuf, scount * sizeof(SType));
 #endif
 }
 
-template <class SType, class RType> void Comm::Alltoall(ConstIterator<SType> sbuf, Long scount, Iterator<RType> rbuf, Long rcount) const {
+template <class SIter, class RIter> void Comm::Alltoall(SIter sbuf, Long scount, RIter rbuf, Long rcount) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+  using RType = typename std::iterator_traits<RIter>::value_type;
+
   static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
   static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Alltoall");
   if (scount) {
     SCTL_UNUSED(sbuf[0]                  );
     SCTL_UNUSED(sbuf[scount * Size() - 1]);
@@ -352,83 +992,351 @@ template <class SType, class RType> void Comm::Alltoall(ConstIterator<SType> sbu
     SCTL_UNUSED(rbuf[0]                  );
     SCTL_UNUSED(rbuf[rcount * Size() - 1]);
   }
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, scount*sizeof(SType) + rcount*sizeof(RType));
-  MPI_Alltoall((scount ? &sbuf[0] : nullptr), scount, CommDatatype<SType>::value(), (rcount ? &rbuf[0] : nullptr), rcount, CommDatatype<RType>::value(), mpi_comm_);
+  comm_detail::TrackCollective(1, scount * sizeof(SType) + rcount * sizeof(RType));
+#if MPI_VERSION >= 4
+  MPI_Alltoall_c((scount ? &sbuf[0] : nullptr), comm_detail::MPIAsCountLarge(scount), CommDatatype<SType>::value(), (rcount ? &rbuf[0] : nullptr), comm_detail::MPIAsCountLarge(rcount), CommDatatype<RType>::value(), impl_->mpi_comm_);
 #else
-  memcopy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, scount * sizeof(SType));
+  if (comm_detail::MPIFitsCount(scount) && comm_detail::MPIFitsCount(rcount)) {
+    MPI_Alltoall((scount ? &sbuf[0] : nullptr), comm_detail::MPIAsCount(scount), CommDatatype<SType>::value(), (rcount ? &rbuf[0] : nullptr), comm_detail::MPIAsCount(rcount), CommDatatype<RType>::value(), impl_->mpi_comm_);
+  } else {
+    SCTL_ASSERT(scount * sizeof(SType) == rcount * sizeof(RType));
+    ScratchBuf<Long> scounts(impl_->mpi_size_), sdispls(impl_->mpi_size_), rcounts(impl_->mpi_size_), rdispls(impl_->mpi_size_);
+    #pragma omp parallel for schedule(static)
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
+      scounts[i] = scount;
+      sdispls[i] = i * scount;
+      rcounts[i] = rcount;
+      rdispls[i] = i * rcount;
+    }
+    auto mpi_req = Ialltoallv_sparse<true>(sbuf, scounts.begin(), sdispls.begin(), rbuf, rcounts.begin(), rdispls.begin(), 0);
+    Wait(std::move(mpi_req));
+  }
+#endif
+#else
+  omp_par::memcpy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, scount * sizeof(SType));
 #endif
 }
 
-template <class SType, class RType> void* Comm::Ialltoallv_sparse(ConstIterator<SType> sbuf, ConstIterator<Long> scounts, ConstIterator<Long> sdispls, Iterator<RType> rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls, Integer tag) const {
+// A node-local Send/Recv pair is a rendezvous with process_vm_readv as its transport: the sender
+// publishes where its buffer is, the receiver reads it there and acknowledges, and the sender
+// returns once acknowledged. Three small messages plus the read against MPI's two plus a copy, so
+// what this saves is the copy. Off-node, and wherever the kernel refuses, both fall back to MPI.
+//
+// The acknowledgement says which of the three outcomes happened, so a receiver that stops on a count
+// mismatch stops the sender along with it rather than leaving it waiting for an answer.
+//
+// The handshake runs on `MPIRendezvousTag`, the tag the payload's first message carries -- not the
+// caller's tag, which belongs to another caller tag's block of chunk tags. MPI does not reorder
+// messages of one (source, tag, communicator), and each direction is posted in the same order at
+// both ends, so the address, the acknowledgement and any fallback payload cannot be mistaken for
+// one another.
+template <class SIter> void Comm::Send(SIter sbuf, Long scount, Integer dest, Integer tag) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+
+  static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Send");
+  const int rv_tag = comm_detail::MPIRendezvousTag(tag, impl_->mpi_tag_ub_);
+  // Not conditioned on the count: both sides must choose the same branch, and only the sender knows
+  // its count.
+  const bool direct_path = (dest != impl_->mpi_rank_ && SameNode(dest) && impl_->direct_);
+  if (direct_path) {
+    const Long tell[2] = {(scount ? (Long)&sbuf[0] : 0), scount * (Long)sizeof(SType)};
+    MPI_Send(tell, 2, MPI_INT64_T, dest, rv_tag, impl_->mpi_comm_);
+    char ack = comm_detail::kAckFallback;
+    MPI_Recv(&ack, 1, MPI_BYTE, dest, rv_tag, impl_->mpi_comm_, MPI_STATUS_IGNORE);
+    SCTL_ASSERT_MSG(ack != comm_detail::kAckCountMismatch, "Comm::Send: the destination's buffer holds a different number of bytes than this call sends; the send and receive counts disagree.");
+    if (ack == comm_detail::kAckRead) return;  // read, so the buffer is mine again
+  }
+#ifdef SCTL_MEMDEBUG
+  // The handshake above carries this count already; where it did not run, send it on its own so the
+  // receiver can compare on every transport rather than only on that one. Posted before the payload
+  // at both ends, so it cannot be taken for it.
+  if (!direct_path) {
+    const Long sbytes = scount * (Long)sizeof(SType);
+    MPI_Send(&sbytes, 1, MPI_INT64_T, dest, rv_tag, impl_->mpi_comm_);
+  }
+#endif
+#endif
+  auto req = Issend(sbuf, scount, dest, tag);
+  Wait(std::move(req));
+}
+
+template <class RType> void Comm::Recv(Iterator<RType> rbuf, Long rcount, Integer source, Integer tag) const {
+  static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Recv");
+  const int rv_tag = comm_detail::MPIRendezvousTag(tag, impl_->mpi_tag_ub_);
+  const bool direct_path = (source != impl_->mpi_rank_ && SameNode(source) && impl_->direct_);
+  if (direct_path) {
+    Long told[2] = {0, 0};
+    MPI_Recv(told, 2, MPI_INT64_T, source, rv_tag, impl_->mpi_comm_, MPI_STATUS_IGNORE);
+    const Long bytes = told[1];
+    // The counts must agree. Reading only what fits would drop the rest without reporting it, where
+    // MPI reports MPI_ERR_TRUNCATE, and a receive buffer larger than the message leaves the chunked
+    // MPI path waiting, since it posts one receive per chunk of `rcount`. Free to check here, since the sender's size
+    // came with its address; the builds that check pay for a message to compare it anywhere else.
+    if (bytes != rcount * (Long)sizeof(RType)) {  // answer first: the sender stops on it too
+      const char ack = comm_detail::kAckCountMismatch;
+      MPI_Send(&ack, 1, MPI_BYTE, source, rv_tag, impl_->mpi_comm_);
+      SCTL_ERROR("Comm::Recv: the source sent a different number of bytes than this buffer holds; the send and receive counts disagree.");
+    }
+    // Only the bytes the read overwrites: past them the buffer is the caller's, and MPI does not
+    // write there. Before the read; after it would overwrite what was read.
+    omp_par::prefault((Iterator<char>)rbuf, bytes);
+    const Integer j = impl_->NodeIdx(source);
+    const bool ok = !bytes || comm_detail::ReadPeer(impl_->node_pid_[j], (const void*)told[0], &rbuf[0], bytes);
+    const char ack = (ok ? comm_detail::kAckRead : comm_detail::kAckFallback);
+    MPI_Send(&ack, 1, MPI_BYTE, source, rv_tag, impl_->mpi_comm_);
+    if (ok) return;
+  }
+#ifdef SCTL_MEMDEBUG
+  if (!direct_path) {  // the count the sender put on the wire for this build
+    Long sbytes = 0;
+    MPI_Recv(&sbytes, 1, MPI_INT64_T, source, rv_tag, impl_->mpi_comm_, MPI_STATUS_IGNORE);
+    SCTL_ASSERT_MSG(sbytes == rcount * (Long)sizeof(RType), "Comm::Recv: the source sent a different number of bytes than this buffer holds; the send and receive counts disagree.");
+  }
+#endif
+#endif
+  auto req = Irecv(rbuf, rcount, source, tag);
+  Wait(std::move(req));
+}
+
+#ifdef SCTL_HAVE_MPI
+template <class SIter, class RIter>
+bool Comm::ReadNodeBlocks(SIter sbuf, ConstIterator<Long> scounts, ConstIterator<Long> sdispls,
+                          RIter rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+  using RType = typename std::iterator_traits<RIter>::value_type;
+  const Integer rank = impl_->mpi_rank_;
+  const Long node_size = (Long)impl_->node_rank_.size();
+  // Where each node peer's block for me starts in that peer's send buffer, and how many bytes it
+  // put there. The size travels with the address because the read cannot ask for it: reading past a
+  // peer's block returns the block next to it rather than failing, so a count that is too large
+  // would deliver a neighbour's data as this one's. Here both counts are in hand.
+  ScratchBuf<Long> stell(2 * node_size), rtell(2 * node_size);
+  for (Long j = 0; j < node_size; j++) {
+    const Integer i = (Integer)impl_->node_rank_[j];
+    stell[2*j+0] = (scounts[i] ? (Long)&sbuf[sdispls[i]] : 0);
+    stell[2*j+1] = scounts[i] * (Long)sizeof(SType);
+  }
+  // Completing this also proves every node peer has entered, so its send buffer is filled.
+  MPI_Alltoall(&stell[0], 2, MPI_INT64_T, &rtell[0], 2, MPI_INT64_T, impl_->node_comm_);
+  int ok = 1;
+  for (Long j = 0; j < node_size; j++) {
+    const Integer i = (Integer)impl_->node_rank_[j];
+    const Long want = rcounts[i] * (Long)sizeof(RType);
+    SCTL_ASSERT_MSG(rtell[2*j+1] == want, "Comm: a node peer sent a different number of bytes than this rank expects; the send and receive counts disagree.");
+    if (i == rank || !rcounts[i]) continue;
+    ok = (int)comm_detail::ReadPeer(impl_->node_pid_[j], (const void*)rtell[2*j+0], &rbuf[rdispls[i]], want) && ok;
+  }
+  // Agree on the outcome so the node falls back together, and hold every rank until its peers have
+  // finished reading its send buffer -- which is what makes the reads safe. Not remembered: after
+  // the probe at init the only refusal left is a permission changed mid-run.
+  int all = 0;
+  MPI_Allreduce(&ok, &all, 1, MPI_INT, MPI_MIN, impl_->node_comm_);
+  return all != 0;
+}
+#endif  // SCTL_HAVE_MPI
+
+template <bool BlockingDirect, class SIter, class RIter> Comm::Request Comm::Ialltoallv_sparse(SIter sbuf, ConstIterator<Long> scounts, ConstIterator<Long> sdispls, RIter rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls, Integer tag) const {
+  using SType = typename std::iterator_traits<SIter>::value_type;
+  using RType = typename std::iterator_traits<RIter>::value_type;
+
   static_assert(std::is_trivially_copyable<SType>::value, "Data is not trivially copyable!");
   static_assert(std::is_trivially_copyable<RType>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
-  Integer request_count = 0;
-  for (Integer i = 0; i < mpi_size_; i++) {
-    if (rcounts[i]) request_count++;
-    if (scounts[i]) request_count++;
+  comm_detail::WarnIfMPIInactive("Comm::Ialltoallv_sparse");
+  #ifdef SCTL_MEMDEBUG
+  comm_detail::AssertCountsAgree(scounts, (Long)sizeof(SType), rcounts, (Long)sizeof(RType), impl_->mpi_size_, impl_->mpi_comm_);
+  #endif
+  const Integer np = impl_->mpi_size_, rank = Rank();
+  const auto on_node = [this](Integer i) { return impl_->NodeIdx(i) >= 0; };
+  // Reading a peer's send buffer means synchronizing the node before returning, which this
+  // routine's name says it will not do, so the caller has to ask for it.
+  const bool direct = BlockingDirect && impl_->direct_;
+  const auto skip = [rank,direct,&on_node](Integer i) { return i == rank || (direct && on_node(i)); };
+  // Every block but self, whichever way it arrives: ReadNodeBlocks needs the node-local ones
+  // faulted in already, and MPI writes the rest. Here the pages fault in with all threads.
+  for (Integer i = 0; i < np; i++) {
+    if (i != rank && rcounts[i]) omp_par::prefault(rbuf + rdispls[i], rcounts[i]);
   }
-  if (!request_count) return nullptr;
-  Vector<MPI_Request>& request = *NewReq();
-  request.ReInit(request_count);
-  Integer request_iter = 0;
 
-  for (Integer i = 0; i < mpi_size_; i++) {
-    if (rcounts[i]) {
-      SCTL_UNUSED(rbuf[rdispls[i]]);
-      SCTL_UNUSED(rbuf[rdispls[i] + rcounts[i] - 1]);
-      Profile::IncrementCounter(ProfileCounter::PROF_MPI_COUNT, 1);
-      Profile::IncrementCounter(ProfileCounter::PROF_MPI_BYTES, rcounts[i]*sizeof(RType));
-      MPI_Irecv(&rbuf[rdispls[i]], rcounts[i], CommDatatype<RType>::value(), i, tag, mpi_comm_, &request[request_iter]);
-      request_iter++;
-    }
-  }
-  for (Integer i = 0; i < mpi_size_; i++) {
-    if (scounts[i]) {
-      SCTL_UNUSED(sbuf[sdispls[i]]);
-      SCTL_UNUSED(sbuf[sdispls[i] + scounts[i] - 1]);
-      Profile::IncrementCounter(ProfileCounter::PROF_MPI_COUNT, 1);
-      Profile::IncrementCounter(ProfileCounter::PROF_MPI_BYTES, scounts[i]*sizeof(SType));
-      MPI_Isend(&sbuf[sdispls[i]], scounts[i], CommDatatype<SType>::value(), i, tag, mpi_comm_, &request[request_iter]);
-      request_iter++;
-    }
-  }
-  return &request;
+  // The off-node blocks go to MPI first, so those transfers are in flight while the node-local
+  // copies below run: different hardware, no reason to serialize them. Receives are posted before
+  // sends, and everything posted here completes in the caller's Wait.
+  const auto chunks = [](Long bytes) {  // MPI-3 counts are int, so a large block goes in pieces under their own tags
+#if MPI_VERSION >= 4
+    return (Long)(bytes != 0);
 #else
-  memcopy((Iterator<char>)(rbuf + rdispls[0]), (ConstIterator<char>)(sbuf + sdispls[0]), scounts[0] * sizeof(SType));
-  return nullptr;
+    return comm_detail::MPINumChunks(bytes);
+#endif
+  };
+  // A slot for every non-empty block of every peer but self -- an empty block costs none. Counted
+  // over all such peers, node-local ones included: the direct read runs after these are posted and
+  // can still be refused, and those peers then go to MPI into the slots kept here.
+  Long slots = 0;
+#if MPI_VERSION < 4
+  Long max_chunks = 0;
+#endif
+  for (Integer i = 0; i < np; i++) {
+    if (i == rank) continue;
+    const Long recv_bytes = rcounts[i] * (Long)sizeof(RType), send_bytes = scounts[i] * (Long)sizeof(SType);
+#if MPI_VERSION < 4
+    max_chunks = std::max<Long>({max_chunks, chunks(recv_bytes), chunks(send_bytes)});
+#endif
+    slots += chunks(recv_bytes) + chunks(send_bytes);
+  }
+#if MPI_VERSION < 4
+  comm_detail::AssertChunkedTagRange(tag, max_chunks, impl_->mpi_tag_ub_);
+#endif
+  Vector<MPI_Request>& request = NewReq(slots);
+  for (Long k = 0; k < slots; k++) request[k] = MPI_REQUEST_NULL;  // Wait ignores the slots left over
+
+  // A send from a ConstIterator, a receive into an Iterator; returns the number of requests posted.
+  const auto post = [this,tag](auto buf, Long bytes, Integer peer, MPI_Request* req) {
+    constexpr bool send = std::is_same<decltype(buf), ConstIterator<char>>::value;
+    SCTL_UNUSED(buf[0]);
+    SCTL_UNUSED(buf[bytes - 1]);
+#if MPI_VERSION >= 4
+    if constexpr (send) MPI_Isend_c(&buf[0], comm_detail::MPIAsCountLarge(bytes), MPI_BYTE, peer, tag, impl_->mpi_comm_, req);
+    else                MPI_Irecv_c(&buf[0], comm_detail::MPIAsCountLarge(bytes), MPI_BYTE, peer, tag, impl_->mpi_comm_, req);
+    return (Long)1;
+#else
+    const Long n = comm_detail::MPINumChunks(bytes);
+    for (Long j = 0, offset = 0; j < n; j++) {
+      const Long chunk = std::min<Long>(bytes - offset, comm_detail::MPIIntLimit());
+      if constexpr (send) MPI_Isend(&buf[offset], comm_detail::MPIAsCount(chunk), MPI_BYTE, peer, comm_detail::MPIChunkTag(tag, j), impl_->mpi_comm_, req + j);
+      else                MPI_Irecv(&buf[offset], comm_detail::MPIAsCount(chunk), MPI_BYTE, peer, comm_detail::MPIChunkTag(tag, j), impl_->mpi_comm_, req + j);
+      offset += chunk;
+    }
+    return n;
+#endif
+  };
+  Long m = 0, posted_bytes = 0;
+  const auto post_peers = [&](const auto& take) {  // receives for the whole set, then sends
+    for (Integer i = 0; i < np; i++) {
+      if (!take(i) || !rcounts[i]) continue;
+      const Long bytes = rcounts[i] * (Long)sizeof(RType);
+      m += post((Iterator<char>)(rbuf + rdispls[i]), bytes, i, &request[m]);
+      posted_bytes += bytes;
+    }
+    for (Integer i = 0; i < np; i++) {
+      if (!take(i) || !scounts[i]) continue;
+      const Long bytes = scounts[i] * (Long)sizeof(SType);
+      m += post((ConstIterator<char>)(sbuf + sdispls[i]), bytes, i, &request[m]);
+      posted_bytes += bytes;
+    }
+  };
+  post_peers([&skip](Integer i) { return !skip(i); });
+
+  // The self block does not reach MPI, so this is the only place its two counts meet.
+  SCTL_ASSERT_MSG(scounts[rank] * (Long)sizeof(SType) == rcounts[rank] * (Long)sizeof(RType), "Comm::Ialltoallv_sparse: this rank's send and receive counts for itself disagree.");
+
+  // Now the node-local work, over memory rather than the network, alongside the transfers above.
+  omp_par::memcpy((Iterator<char>)(rbuf + rdispls[rank]), (ConstIterator<char>)(sbuf + sdispls[rank]), scounts[rank] * (Long)sizeof(SType));
+  if (direct && !ReadNodeBlocks(sbuf, scounts, sdispls, rbuf, rcounts, rdispls)) {
+    // Refused: the node peers go through MPI after all, into the slots kept for them. Their receive
+    // blocks were faulted in with the rest above.
+    post_peers([rank,&on_node](Integer i) { return i != rank && on_node(i); });
+  }
+  comm_detail::TrackPointToPoint(m, posted_bytes);
+  return Request(&request);
+#else
+  omp_par::memcpy((Iterator<char>)(rbuf + rdispls[0]), (ConstIterator<char>)(sbuf + sdispls[0]), scounts[0] * sizeof(SType));
+  return Request();
 #endif
 }
 
-template <class Type> void Comm::Alltoallv(ConstIterator<Type> sbuf, ConstIterator<Long> scounts, ConstIterator<Long> sdispls, Iterator<Type> rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls) const {
+template <class SIter, class RIter> void Comm::Alltoallv(SIter sbuf, ConstIterator<Long> scounts, ConstIterator<Long> sdispls, RIter rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+  static_assert(std::is_same<Type, typename std::iterator_traits<RIter>::value_type>::value,
+                "Comm::Alltoallv: the send and receive buffers must hold the same type");
+
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
+  comm_detail::WarnIfMPIInactive("Comm::Alltoallv");
+  #ifdef SCTL_MEMDEBUG
+  comm_detail::AssertCountsAgree(scounts, (Long)sizeof(Type), rcounts, (Long)sizeof(Type), impl_->mpi_size_, impl_->mpi_comm_);
+  #endif
+#if MPI_VERSION >= 4
+  {
+    // MPI-4 handles large counts and displacements directly through the _c binding.
+    ScratchBuf<MPI_Count> scnt(impl_->mpi_size_), rcnt(impl_->mpi_size_);
+    ScratchBuf<MPI_Aint>  sdsp(impl_->mpi_size_), rdsp(impl_->mpi_size_);
+    Long stotal = 0, rtotal = 0;
+    #pragma omp parallel for schedule(static) reduction(+ : stotal, rtotal)
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
+      scnt[i] = comm_detail::MPIAsCountLarge(scounts[i]);
+      sdsp[i] = comm_detail::MPIAsAint(sdispls[i]);
+      rcnt[i] = comm_detail::MPIAsCountLarge(rcounts[i]);
+      rdsp[i] = comm_detail::MPIAsAint(rdispls[i]);
+      stotal += scounts[i];
+      rtotal += rcounts[i];
+    }
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {  // receive pages fault in with all threads, not MPI's one
+      if (i != Rank() && rcounts[i]) omp_par::prefault(rbuf + rdispls[i], rcounts[i]);
+    }
+    // The self block is a local copy, and where the kernel allows it so is every other block that
+    // stays on this node: this routine blocks either way, so reading them costs nothing here.
+    if (impl_->direct_ && ReadNodeBlocks(sbuf, scounts, sdispls, rbuf, rcounts, rdispls)) {
+      for (Integer i = 0; i < impl_->mpi_size_; i++) {
+        if (i != Rank() && impl_->NodeIdx(i) >= 0) {
+          scnt[i] = 0;
+          rcnt[i] = 0;
+        }
+      }
+    }
+    scnt[Rank()] = 0;
+    rcnt[Rank()] = 0;
+    // The self block does not reach MPI, so this is the only place its two counts meet.
+    SCTL_ASSERT_MSG(scounts[Rank()] == rcounts[Rank()], "Comm::Alltoallv: this rank's send and receive counts for itself disagree.");
+    omp_par::memcpy(rbuf + rdispls[Rank()], sbuf + sdispls[Rank()], scounts[Rank()]);
+    comm_detail::TrackCollective(1, stotal * sizeof(Type) + rtotal * sizeof(Type));
+    MPI_Alltoallv_c((stotal ? &sbuf[0] : nullptr), &scnt[0], &sdsp[0], CommDatatype<Type>::value(), (rtotal ? &rbuf[0] : nullptr), &rcnt[0], &rdsp[0], CommDatatype<Type>::value(), impl_->mpi_comm_);
+    return;
+  }
+#else
+  bool fits_int = true;
+  for (Integer i = 0; i < impl_->mpi_size_; i++) {
+    fits_int = fits_int && comm_detail::MPIFitsCount(scounts[i]) && comm_detail::MPIFitsCount(sdispls[i]) && comm_detail::MPIFitsCount(rcounts[i]) && comm_detail::MPIFitsCount(rdispls[i]);
+  }
+  { // fits_int must agree across ranks: the branches below have different collective sequences
+    Long loc_fits = (fits_int ? 1 : 0), glb_fits = 0;
+    Allreduce(Ptr2ConstItr<Long>(&loc_fits, 1), Ptr2Itr<Long>(&glb_fits, 1), 1, CommOp::MIN);
+    fits_int = (glb_fits != 0);
+  }
+  if (!fits_int) {  // Fall back to sparse point-to-point exchange once any count or displacement exceeds int.
+    auto mpi_req = Ialltoallv_sparse<true>(sbuf, scounts, sdispls, rbuf, rcounts, rdispls, 0);
+    Wait(std::move(mpi_req));
+    return;
+  }
+
   {  // Use Alltoallv_sparse of average connectivity<64
     Long connectivity = 0, glb_connectivity = 0;
-#pragma omp parallel for schedule(static) reduction(+ : connectivity)
-    for (Integer i = 0; i < mpi_size_; i++) {
+    #pragma omp parallel for schedule(static) reduction(+ : connectivity)
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
       if (rcounts[i]) connectivity++;
     }
     Allreduce(Ptr2ConstItr<Long>(&connectivity, 1), Ptr2Itr<Long>(&glb_connectivity, 1), 1, CommOp::SUM);
     if (glb_connectivity < 64 * Size()) {
-      void* mpi_req = Ialltoallv_sparse(sbuf, scounts, sdispls, rbuf, rcounts, rdispls, 0);
-      Wait(mpi_req);
+      auto mpi_req = Ialltoallv_sparse<true>(sbuf, scounts, sdispls, rbuf, rcounts, rdispls, 0);
+      Wait(std::move(mpi_req));
       { // Verify
         #ifdef SCTL_MEMDEBUG
-        for (long i = 0; i < mpi_size_-1; i++) {
+        for (long i = 0; i < impl_->mpi_size_-1; i++) {
           SCTL_ASSERT(sdispls[i+1]-sdispls[i] == scounts[i]);
           SCTL_ASSERT(rdispls[i+1]-rdispls[i] == rcounts[i]);
         }
         SCTL_ASSERT(sdispls[0] == 0);
         SCTL_ASSERT(rdispls[0] == 0);
 
-        const Long Nsend = sdispls[mpi_size_-1] + scounts[mpi_size_-1];
-        Vector<Type> sbuf_verify(Nsend);
-        mpi_req = Ialltoallv_sparse(rbuf, rcounts, rdispls, sbuf_verify.begin(), scounts, sdispls, 1);
-        Wait(mpi_req);
+        const Long Nsend = sdispls[impl_->mpi_size_-1] + scounts[impl_->mpi_size_-1];
+        ScratchBuf<Type> sbuf_verify(Nsend);
+        mpi_req = Ialltoallv_sparse<true>(rbuf, rcounts, rdispls, sbuf_verify.begin(), scounts, sdispls, 1);
+        Wait(std::move(mpi_req));
 
-        for (long p = 0; p < mpi_size_; p++) {
+        for (long p = 0; p < impl_->mpi_size_; p++) {
           for (long j = 0; j < scounts[p]*(long)sizeof(Type); j++) {
             long i = sdispls[p]*(long)sizeof(Type) + j;
             if (((char*)&sbuf_verify[0])[i] != ((char*)&sbuf[0])[i]) {
@@ -446,14 +1354,10 @@ template <class Type> void Comm::Alltoallv(ConstIterator<Type> sbuf, ConstIterat
 
   {  // Use vendor MPI_Alltoallv
     //#ifndef ALLTOALLV_FIX
-    Vector<int> scnt, sdsp, rcnt, rdsp;
-    scnt.ReInit(mpi_size_);
-    sdsp.ReInit(mpi_size_);
-    rcnt.ReInit(mpi_size_);
-    rdsp.ReInit(mpi_size_);
+    ScratchBuf<int> scnt(impl_->mpi_size_), sdsp(impl_->mpi_size_), rcnt(impl_->mpi_size_), rdsp(impl_->mpi_size_);
     Long stotal = 0, rtotal = 0;
-#pragma omp parallel for schedule(static) reduction(+ : stotal, rtotal)
-    for (Integer i = 0; i < mpi_size_; i++) {
+    #pragma omp parallel for schedule(static) reduction(+ : stotal, rtotal)
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {
       scnt[i] = scounts[i];
       sdsp[i] = sdispls[i];
       rcnt[i] = rcounts[i];
@@ -462,78 +1366,295 @@ template <class Type> void Comm::Alltoallv(ConstIterator<Type> sbuf, ConstIterat
       rtotal += rcounts[i];
     }
 
-    Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-    Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, stotal*sizeof(Type) + rtotal*sizeof(Type));
-    MPI_Alltoallv((stotal ? &sbuf[0] : nullptr), &scnt[0], &sdsp[0], CommDatatype<Type>::value(), (rtotal ? &rbuf[0] : nullptr), &rcnt[0], &rdsp[0], CommDatatype<Type>::value(), mpi_comm_);
+    for (Integer i = 0; i < impl_->mpi_size_; i++) {  // receive pages fault in with all threads, not MPI's one
+      if (i != Rank() && rcounts[i]) omp_par::prefault(rbuf + rdispls[i], rcounts[i]);
+    }
+    // The self block is a local copy, and where the kernel allows it so is every other block that
+    // stays on this node: this routine blocks either way, so reading them costs nothing here.
+    if (impl_->direct_ && ReadNodeBlocks(sbuf, scounts, sdispls, rbuf, rcounts, rdispls)) {
+      for (Integer i = 0; i < impl_->mpi_size_; i++) {
+        if (i != Rank() && impl_->NodeIdx(i) >= 0) {
+          scnt[i] = 0;
+          rcnt[i] = 0;
+        }
+      }
+    }
+    scnt[Rank()] = 0;
+    rcnt[Rank()] = 0;
+    // The self block does not reach MPI, so this is the only place its two counts meet.
+    SCTL_ASSERT_MSG(scounts[Rank()] == rcounts[Rank()], "Comm::Alltoallv: this rank's send and receive counts for itself disagree.");
+    omp_par::memcpy(rbuf + rdispls[Rank()], sbuf + sdispls[Rank()], scounts[Rank()]);
+    comm_detail::TrackCollective(1, stotal * sizeof(Type) + rtotal * sizeof(Type));
+    MPI_Alltoallv((stotal ? &sbuf[0] : nullptr), &scnt[0], &sdsp[0], CommDatatype<Type>::value(), (rtotal ? &rbuf[0] : nullptr), &rcnt[0], &rdsp[0], CommDatatype<Type>::value(), impl_->mpi_comm_);
     return;
     //#endif
   }
 
 // TODO: implement hypercube scheme
+#endif
 #else
-  memcopy((Iterator<char>)(rbuf + rdispls[0]), (ConstIterator<char>)(sbuf + sdispls[0]), scounts[0] * sizeof(Type));
+  omp_par::memcpy((Iterator<char>)(rbuf + rdispls[0]), (ConstIterator<char>)(sbuf + sdispls[0]), scounts[0] * sizeof(Type));
 #endif
 }
 
-template <class Type> void Comm::Allreduce(ConstIterator<Type> sbuf, Iterator<Type> rbuf, Long count, CommOp op) const {
+template <class SIter, class RIter> void Comm::Alltoallv_dense(SIter sbuf, ConstIterator<Long> scounts, ConstIterator<Long> sdispls, RIter rbuf, ConstIterator<Long> rcounts, ConstIterator<Long> rdispls) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+  static_assert(std::is_same<Type, typename std::iterator_traits<RIter>::value_type>::value,
+                "Comm::Alltoallv_dense: the send and receive buffers must hold the same type");
+
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+  // Ported from pvfmm's par::Mpi_Alltoallv_dense. Recursive bitonic split-exchange:
+  // at each level we halve the rank group, send all data destined for the comparison
+  // half to our partner, then concatenate the received block back into our working
+  // buffer alongside whatever we already had for our own half. Each per-destination
+  // payload carries a {blk_size, src_pid} header so the final unpack can recover
+  // the original sender at each rank.
 #ifdef SCTL_HAVE_MPI
-  if (!count) return;
-  MPI_Op mpi_op;
-  switch (op) {
-    case CommOp::SUM:
-      mpi_op = CommDatatype<Type>::sum();
-      break;
-    case CommOp::MIN:
-      mpi_op = CommDatatype<Type>::min();
-      break;
-    case CommOp::MAX:
-      mpi_op = CommDatatype<Type>::max();
-      break;
-    default:
-      mpi_op = MPI_OP_NULL;
-      break;
+  comm_detail::WarnIfMPIInactive("Comm::Alltoallv_dense");
+  const Integer np  = Size();
+  const Integer pid = Rank();
+  // Per-block header: { blk_size_bytes, src_pid }. Both Long.
+  constexpr Long kHeaderBytes = 2 * (Long)sizeof(Long);
+
+  // Initial packing into sbuff: for each destination i, a (header + payload) block.
+  Vector<Long> s_cnt(np);
+  Vector<Long> sdisp(np);
+  #pragma omp parallel for schedule(static)
+  for (Integer i = 0; i < np; i++) {
+    s_cnt[i] = scounts[i] * (Long)sizeof(Type) + kHeaderBytes;
   }
-  SCTL_UNUSED(sbuf[0]        );
-  SCTL_UNUSED(sbuf[count - 1]);
-  SCTL_UNUSED(rbuf[0]        );
-  SCTL_UNUSED(rbuf[count - 1]);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, count*sizeof(Type));
-  MPI_Allreduce(&sbuf[0], &rbuf[0], count, CommDatatype<Type>::value(), mpi_op, mpi_comm_);
+  sdisp[0] = 0;
+  omp_par::scan(s_cnt.begin(), sdisp.begin(), np);
+  const Long total_bytes = sdisp[np - 1] + s_cnt[np - 1];
+
+  Vector<char> sbuff(total_bytes);
+  #pragma omp parallel for schedule(static)
+  for (Integer i = 0; i < np; i++) {
+    Iterator<char> block = sbuff.begin() + sdisp[i];
+    const Long hdr[2] = {s_cnt[i], (Long)pid};
+    std::memcpy(&block[0], hdr, kHeaderBytes);
+    if (scounts[i] > 0) {
+      std::memcpy(&block[kHeaderBytes], &sbuf[sdispls[i]], (size_t)(scounts[i] * (Long)sizeof(Type)));
+    }
+  }
+
+  Integer range[2] = {0, (Integer)(np - 1)};
+  while (range[0] < range[1]) {
+    const Integer split_id = (range[0] + range[1]) / 2;
+    const Integer new_range[2] = { (pid <= split_id ? range[0] : (Integer)(split_id + 1)),
+                                   (pid <= split_id ? split_id : range[1]              ) };
+    const Integer cmp_range[2] = { (pid >  split_id ? range[0] : (Integer)(split_id + 1)),
+                                   (pid >  split_id ? split_id : range[1]              ) };
+    const Integer new_np = new_range[1] - new_range[0] + 1;
+    const Integer cmp_np = cmp_range[1] - cmp_range[0] + 1;
+    Integer partner = pid + cmp_range[0] - new_range[0];
+    if (partner > range[1]) partner = range[1];
+    SCTL_ASSERT(partner >= range[0]);
+    const bool extra_partner = (((range[1] - range[0]) % 2 == 0) && (range[1] == pid));
+
+    Iterator<Long> s_lengths = s_cnt.begin() + (cmp_range[0] - range[0]);
+    Vector<Long> s_len_ext(cmp_np);
+    Vector<Long> r_cnt(new_np);
+    Vector<Long> r_cnt_ext(new_np);
+    for (Integer i = 0; i < cmp_np; i++) s_len_ext[i] = 0;
+    for (Integer i = 0; i < new_np; i++) { r_cnt[i] = 0; r_cnt_ext[i] = 0; }
+
+    {  // Sendrecv block-length headers.
+      Request recv_req = Irecv(r_cnt.begin(), new_np, partner, 0);
+      Request send_req = Issend(s_lengths, cmp_np, partner, 0);
+      Wait(std::move(recv_req));
+      Wait(std::move(send_req));
+    }
+    if (extra_partner) {
+      Request recv_req = Irecv(r_cnt_ext.begin(), new_np, split_id, 0);
+      Request send_req = Issend(s_len_ext.begin(), cmp_np, split_id, 0);
+      Wait(std::move(recv_req));
+      Wait(std::move(send_req));
+    }
+
+    Vector<Long> rdisp(new_np);
+    Vector<Long> rdisp_ext(new_np);
+    rdisp[0] = 0;     omp_par::scan(r_cnt.begin(),     rdisp.begin(),     new_np);
+    rdisp_ext[0] = 0; omp_par::scan(r_cnt_ext.begin(), rdisp_ext.begin(), new_np);
+    const Long rbuff_size     = rdisp[new_np - 1]     + r_cnt[new_np - 1];
+    const Long rbuff_size_ext = rdisp_ext[new_np - 1] + r_cnt_ext[new_np - 1];
+    Vector<char> rbuff(rbuff_size);
+    Vector<char> rbuff_ext(extra_partner ? rbuff_size_ext : 0);
+
+    {  // Sendrecv payloads.
+      Iterator<Long> s_cnt_tmp  = s_cnt.begin() + (cmp_range[0] - range[0]);
+      Iterator<Long> sdisp_tmp  = sdisp.begin() + (cmp_range[0] - range[0]);
+      Iterator<char> sbuff_tmp  = sbuff.begin() + sdisp_tmp[0];
+      const Long sbuff_size = sdisp_tmp[cmp_np - 1] + s_cnt_tmp[cmp_np - 1] - sdisp_tmp[0];
+      Request recv_req = Irecv(rbuff.begin(), rbuff_size, partner, 0);
+      Request send_req = Issend(sbuff_tmp, sbuff_size, partner, 0);
+      Wait(std::move(recv_req));
+      Wait(std::move(send_req));
+      if (extra_partner) {  // matching zero-length send is skipped on the peer
+        Request recv_req_ext = Irecv(rbuff_ext.begin(), rbuff_size_ext, split_id, 0);
+        Wait(std::move(recv_req_ext));
+      }
+    }
+
+    {  // Rearrange: merge own slice + received + (optional) extra into a new sbuff.
+      Iterator<Long> s_cnt_old = s_cnt.begin() + (new_range[0] - range[0]);
+      Iterator<Long> sdisp_old = sdisp.begin() + (new_range[0] - range[0]);
+
+      Vector<Long> s_cnt_new(new_np);
+      Vector<Long> sdisp_new(new_np);
+      #pragma omp parallel for schedule(static)
+      for (Integer i = 0; i < new_np; i++) {
+        s_cnt_new[i] = s_cnt_old[i] + r_cnt[i] + r_cnt_ext[i];
+      }
+      sdisp_new[0] = 0;
+      omp_par::scan(s_cnt_new.begin(), sdisp_new.begin(), new_np);
+
+      const Long new_total = sdisp_new[new_np - 1] + s_cnt_new[new_np - 1];
+      Vector<char> sbuff_new(new_total);
+      #pragma omp parallel for schedule(static)
+      for (Integer i = 0; i < new_np; i++) {
+        if (s_cnt_old[i] > 0) std::memcpy(&sbuff_new[sdisp_new[i]],
+                                          &sbuff   [sdisp_old[i]],
+                                          (size_t)s_cnt_old[i]);
+        if (r_cnt[i]     > 0) std::memcpy(&sbuff_new[sdisp_new[i] + s_cnt_old[i]],
+                                          &rbuff   [rdisp[i]],
+                                          (size_t)r_cnt[i]);
+        if (r_cnt_ext[i] > 0) std::memcpy(&sbuff_new[sdisp_new[i] + s_cnt_old[i] + r_cnt[i]],
+                                          &rbuff_ext[rdisp_ext[i]],
+                                          (size_t)r_cnt_ext[i]);
+      }
+
+      sbuff.Swap(sbuff_new);
+      s_cnt.Swap(s_cnt_new);
+      sdisp.Swap(sdisp_new);
+    }
+
+    range[0] = new_range[0];
+    range[1] = new_range[1];
+  }
+
+  // Final pass: walk the linear buffer block-by-block and unpack each payload
+  // into rbuf at the original sender's slot.
+  Vector<Long> block_off(np);
+  Long cur_off = 0;
+  for (Integer i = 0; i < np; i++) {
+    block_off[i] = cur_off;
+    Long blk_size;
+    std::memcpy(&blk_size, &sbuff[cur_off], sizeof(Long));
+    cur_off += blk_size;
+  }
+  #pragma omp parallel for schedule(static)
+  for (Integer i = 0; i < np; i++) {
+    Iterator<char> block = sbuff.begin() + block_off[i];
+    Long hdr[2];
+    std::memcpy(hdr, &block[0], kHeaderBytes);
+    const Long blk_size = hdr[0];
+    const Long src_pid  = hdr[1];
+    const Long payload_bytes = blk_size - kHeaderBytes;
+    SCTL_ASSERT(payload_bytes <= rcounts[src_pid] * (Long)sizeof(Type));
+    if (payload_bytes > 0) {
+      std::memcpy(&rbuf[rdispls[src_pid]], &block[kHeaderBytes], (size_t)payload_bytes);
+    }
+  }
 #else
-  memcopy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, count * sizeof(Type));
+  // Serial fallback: single rank, payload[i=0] just copies through.
+  if (scounts[0] > 0) {
+    omp_par::memcpy((Iterator<char>)(rbuf + rdispls[0]),
+                    (ConstIterator<char>)(sbuf + sdispls[0]),
+                    scounts[0] * sizeof(Type));
+  }
 #endif
 }
 
-template <class Type> void Comm::Scan(ConstIterator<Type> sbuf, Iterator<Type> rbuf, int count, CommOp op) const {
+#ifdef SCTL_HAVE_MPI
+template <class SIter, class RIter> inline void Comm::AllreduceImpl(SIter sbuf, RIter rbuf, Long count, MPI_Op mpi_op) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+  static_assert(std::is_same<Type, typename std::iterator_traits<RIter>::value_type>::value,
+                "Comm::Allreduce: the send and receive buffers must hold the same type");
+
+  comm_detail::WarnIfMPIInactive("Comm::Allreduce");
+  comm_detail::TouchBuffer(sbuf, count);
+  comm_detail::TouchBuffer(rbuf, count);
+#if MPI_VERSION >= 4
+  comm_detail::TrackCollective(1, count * sizeof(Type));
+  MPI_Allreduce_c(&sbuf[0], &rbuf[0], comm_detail::MPIAsCountLarge(count), CommDatatype<Type>::value(), mpi_op, impl_->mpi_comm_);
+#else
+  comm_detail::TrackCollective(comm_detail::MPINumChunks(count), count * sizeof(Type));
+  for (Long offset = 0; offset < count; offset += comm_detail::MPIIntLimit()) {
+    const Long chunk = std::min<Long>(count - offset, comm_detail::MPIIntLimit());
+    MPI_Allreduce(&sbuf[offset], &rbuf[offset], comm_detail::MPIAsCount(chunk), CommDatatype<Type>::value(), mpi_op, impl_->mpi_comm_);
+  }
+#endif
+}
+#endif
+
+template <class SIter, class RIter> void Comm::Allreduce(SIter sbuf, RIter rbuf, Long count, CommOp op) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
 #ifdef SCTL_HAVE_MPI
   if (!count) return;
-  MPI_Op mpi_op;
-  switch (op) {
-    case CommOp::SUM:
-      mpi_op = CommDatatype<Type>::sum();
-      break;
-    case CommOp::MIN:
-      mpi_op = CommDatatype<Type>::min();
-      break;
-    case CommOp::MAX:
-      mpi_op = CommDatatype<Type>::max();
-      break;
-    default:
-      mpi_op = MPI_OP_NULL;
-      break;
-  }
-  SCTL_UNUSED(sbuf[0]        );
-  SCTL_UNUSED(sbuf[count - 1]);
-  SCTL_UNUSED(rbuf[0]        );
-  SCTL_UNUSED(rbuf[count - 1]);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_COUNT, 1);
-  Profile::IncrementCounter(ProfileCounter::PROF_MPI_COLLECTIVE_BYTES, count*sizeof(Type));
-  MPI_Scan(&sbuf[0], &rbuf[0], count, CommDatatype<Type>::value(), mpi_op, mpi_comm_);
+  AllreduceImpl(sbuf, rbuf, count, GetMPIOp<Type>(op));
 #else
-  memcopy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, count * sizeof(Type));
+  omp_par::memcpy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, count * sizeof(Type));
+#endif
+}
+
+template <CommOp op, class SIter, class RIter> void Comm::Allreduce(SIter sbuf, RIter rbuf, Long count) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+
+  static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  if (!count) return;
+  AllreduceImpl(sbuf, rbuf, count, GetMPIOp<op, Type>());
+#else
+  omp_par::memcpy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, count * sizeof(Type));
+#endif
+}
+
+#ifdef SCTL_HAVE_MPI
+template <class SIter, class RIter> inline void Comm::ScanImpl(SIter sbuf, RIter rbuf, Long count, MPI_Op mpi_op) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+  static_assert(std::is_same<Type, typename std::iterator_traits<RIter>::value_type>::value,
+                "Comm::Scan: the send and receive buffers must hold the same type");
+
+  comm_detail::WarnIfMPIInactive("Comm::Scan");
+  comm_detail::TouchBuffer(sbuf, count);
+  comm_detail::TouchBuffer(rbuf, count);
+#if MPI_VERSION >= 4
+  comm_detail::TrackCollective(1, count * sizeof(Type));
+  MPI_Scan_c(&sbuf[0], &rbuf[0], comm_detail::MPIAsCountLarge(count), CommDatatype<Type>::value(), mpi_op, impl_->mpi_comm_);
+#else
+  comm_detail::TrackCollective(comm_detail::MPINumChunks(count), count * sizeof(Type));
+  for (Long offset = 0; offset < count; offset += comm_detail::MPIIntLimit()) {
+    const Long chunk = std::min<Long>(count - offset, comm_detail::MPIIntLimit());
+    MPI_Scan(&sbuf[offset], &rbuf[offset], comm_detail::MPIAsCount(chunk), CommDatatype<Type>::value(), mpi_op, impl_->mpi_comm_);
+  }
+#endif
+}
+#endif
+
+template <class SIter, class RIter> void Comm::Scan(SIter sbuf, RIter rbuf, Long count, CommOp op) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+
+  static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  if (!count) return;
+  ScanImpl(sbuf, rbuf, count, GetMPIOp<Type>(op));
+#else
+  omp_par::memcpy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, count * sizeof(Type));
+#endif
+}
+
+template <CommOp op, class SIter, class RIter> void Comm::Scan(SIter sbuf, RIter rbuf, Long count) const {
+  using Type = typename std::iterator_traits<SIter>::value_type;
+
+  static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  if (!count) return;
+  ScanImpl(sbuf, rbuf, count, GetMPIOp<op, Type>());
+#else
+  omp_par::memcpy((Iterator<char>)rbuf, (ConstIterator<char>)sbuf, count * sizeof(Type));
 #endif
 }
 
@@ -541,45 +1662,35 @@ template <class Type> void Comm::PartitionW(Vector<Type>& nodeList, const Vector
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
   Integer npes = Size();
   if (npes == 1) return;
-  Long nlSize = nodeList.Dim();
+  const Long nlSize = nodeList.Dim();
 
-  Vector<Long> wts;
-  Long localWt = 0;
-  if (wts_ == nullptr) {  // Construct arrays of wts.
-    wts.ReInit(nlSize);
-#pragma omp parallel for schedule(static)
-    for (Long i = 0; i < nlSize; i++) {
-      wts[i] = 1;
-    }
-    localWt = nlSize;
-  } else {
-    wts.ReInit(nlSize, (Iterator<Long>)wts_->begin(), false);
-#pragma omp parallel for reduction(+ : localWt)
-    for (Long i = 0; i < nlSize; i++) {
-      localWt += wts[i];
-    }
+  if (wts_ == nullptr) {  // use PartitionN
+    StaticArray<Long,2> length{nlSize, 0};
+    Allreduce(length + 0, length + 1, 1, CommOp::SUM);
+    PartitionN(nodeList, length[1]*(Rank()+1)/npes - length[1]*Rank()/npes);
+    return;
   }
+  const Vector<Long>& wts = *wts_;
+
+  Long localWt = 0;
+  #pragma omp parallel for reduction(+ : localWt)
+  for (Long i = 0; i < nlSize; i++) localWt += wts[i];
 
   Long off1 = 0, off2 = 0, totalWt = 0;
   {  // compute the total weight of the problem ...
-    Allreduce<Long>(Ptr2ConstItr<Long>(&localWt, 1), Ptr2Itr<Long>(&totalWt, 1), 1, CommOp::SUM);
-    Scan<Long>(Ptr2ConstItr<Long>(&localWt, 1), Ptr2Itr<Long>(&off2, 1), 1, CommOp::SUM);
+    Allreduce(Ptr2ConstItr<Long>(&localWt, 1), Ptr2Itr<Long>(&totalWt, 1), 1, CommOp::SUM);
+    Scan(Ptr2ConstItr<Long>(&localWt, 1), Ptr2Itr<Long>(&off2, 1), 1, CommOp::SUM);
     off1 = off2 - localWt;
   }
 
-  Vector<Long> lscn;
+  ScratchBuf<Long> lscn(nlSize);
   if (nlSize) {  // perform a local scan on the weights first ...
-    lscn.ReInit(nlSize);
     lscn[0] = off1;
     omp_par::scan(wts.begin(), lscn.begin(), nlSize);
   }
 
-  Vector<Long> sendSz, recvSz, sendOff, recvOff;
-  sendSz.ReInit(npes);
-  recvSz.ReInit(npes);
-  sendOff.ReInit(npes);
-  recvOff.ReInit(npes);
-  sendSz.SetZero();
+  ScratchBuf<Long> sendSz(npes), recvSz(npes), sendOff(npes), recvOff(npes);
+  memset(sendSz.begin(), 0, npes);
 
   if (nlSize > 0 && totalWt > 0) {  // Compute sendSz
     Long pid1 = (off1 * npes) / totalWt;
@@ -587,7 +1698,7 @@ template <class Type> void Comm::PartitionW(Vector<Type>& nodeList, const Vector
     assert((totalWt * pid2) / npes >= off2);
     pid1 = (pid1 < 0 ? 0 : pid1);
     pid2 = (pid2 > npes ? npes : pid2);
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = pid1; i < pid2; i++) {
       Long wt1 = (totalWt * (i)) / npes;
       Long wt2 = (totalWt * (i + 1)) / npes;
@@ -600,9 +1711,14 @@ template <class Type> void Comm::PartitionW(Vector<Type>& nodeList, const Vector
   } else {
     sendSz[0] = nlSize;
   }
+  {  // Skip if already partitioned
+    StaticArray<Long,2> send_to_other{nodeList.Dim() - sendSz[Rank()], 0};
+    Allreduce(send_to_other + 0, send_to_other + 1, 1, CommOp::SUM);
+    if (send_to_other[1] == 0) return;
+  }
 
   // Exchange sendSz, recvSz
-  Alltoall<Long>(sendSz.begin(), 1, recvSz.begin(), 1);
+  Alltoall(sendSz.begin(), 1, recvSz.begin(), 1);
 
   {  // Compute sendOff, recvOff
     sendOff[0] = 0;
@@ -615,8 +1731,8 @@ template <class Type> void Comm::PartitionW(Vector<Type>& nodeList, const Vector
   // perform All2All  ...
   Vector<Type> newNodes;
   newNodes.ReInit(recvSz[npes - 1] + recvOff[npes - 1]);
-  void* mpi_req = Ialltoallv_sparse<Type>(nodeList.begin(), sendSz.begin(), sendOff.begin(), newNodes.begin(), recvSz.begin(), recvOff.begin());
-  Wait(mpi_req);
+  auto mpi_req = Ialltoallv_sparse<true>(nodeList.begin(), sendSz.begin(), sendOff.begin(), newNodes.begin(), recvSz.begin(), recvOff.begin(), 0);
+  Wait(std::move(mpi_req));
 
   // reset the pointer ...
   nodeList.Swap(newNodes);
@@ -628,8 +1744,8 @@ template <class Type> void Comm::PartitionN(Vector<Type>& v, Long N) const {
   Integer np = Size();
   if (np == 1) return;
 
-  Vector<Long> v_cnt(np), v_dsp(np + 1);
-  Vector<Long> N_cnt(np), N_dsp(np + 1);
+  ScratchBuf<Long> v_cnt(np), v_dsp(np + 1);
+  ScratchBuf<Long> N_cnt(np), N_dsp(np + 1);
   {  // Set v_cnt, v_dsp
     v_dsp[0] = 0;
     Long cnt = v.Dim();
@@ -650,18 +1766,23 @@ template <class Type> void Comm::PartitionN(Vector<Type>& v, Long N) const {
     if (dof == 0) return;
 
     if (dof != 1) {
-#pragma omp parallel for schedule(static)
+      #pragma omp parallel for schedule(static)
       for (Integer i = 0; i < np; i++) N_cnt[i] *= dof;
-#pragma omp parallel for schedule(static)
+      #pragma omp parallel for schedule(static)
       for (Integer i = 0; i <= np; i++) N_dsp[i] *= dof;
     }
+  }
+  {  // Skip if already partitioned
+    bool is_partitioned = true;
+    #pragma omp parallel for schedule(static) reduction(&& : is_partitioned)
+    for (Integer i = 0; i < np; i++) is_partitioned = is_partitioned && (v_cnt[i] == N_cnt[i]);
+    if (is_partitioned) return;
   }
 
   Vector<Type> v_(N_cnt[rank]);
   {  // Set v_
-    Vector<Long> scnt(np), sdsp(np);
-    Vector<Long> rcnt(np), rdsp(np);
-#pragma omp parallel for schedule(static)
+    ScratchBuf<Long> scnt(np), sdsp(np), rcnt(np), rdsp(np);
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < np; i++) {
       {  // Set scnt
         Long n0 = N_dsp[i + 0];
@@ -687,8 +1808,8 @@ template <class Type> void Comm::PartitionN(Vector<Type>& v, Long N) const {
     rdsp[0] = 0;
     omp_par::scan(rcnt.begin(), rdsp.begin(), np);
 
-    void* mpi_request = Ialltoallv_sparse(v.begin(), scnt.begin(), sdsp.begin(), v_.begin(), rcnt.begin(), rdsp.begin());
-    Wait(mpi_request);
+    auto mpi_request = Ialltoallv_sparse<true>(v.begin(), scnt.begin(), sdsp.begin(), v_.begin(), rcnt.begin(), rdsp.begin(), 0);
+    Wait(std::move(mpi_request));
   }
   v.Swap(v_);
 }
@@ -698,21 +1819,25 @@ template <class Type, class Compare> void Comm::PartitionS(Vector<Type>& nodeLis
   Integer npes = Size();
   if (npes == 1) return;
 
-  Vector<Type> mins(npes);
+  ScratchBuf<Type> mins(npes);
   Allgather(Ptr2ConstItr<Type>(&splitter, 1), 1, mins.begin(), 1);
 
-  Vector<Long> scnt(npes), sdsp(npes);
-  Vector<Long> rcnt(npes), rdsp(npes);
+  ScratchBuf<Long> scnt(npes), sdsp(npes), rcnt(npes), rdsp(npes);
   {  // Compute scnt, sdsp
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < npes; i++) {
       sdsp[i] = std::lower_bound(nodeList.begin(), nodeList.begin() + nodeList.Dim(), mins[i], comp) - nodeList.begin();
     }
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < npes - 1; i++) {
       scnt[i] = sdsp[i + 1] - sdsp[i];
     }
     scnt[npes - 1] = nodeList.Dim() - sdsp[npes - 1];
+  }
+  {  // Skip if already partitioned
+    StaticArray<Long,2> send_to_other{nodeList.Dim()-scnt[Rank()], 0};
+    Allreduce(send_to_other+0, send_to_other+1, 1, CommOp::SUM);
+    if (send_to_other[1] == 0) return;
   }
   {  // Compute rcnt, rdsp
     rdsp[0] = 0;
@@ -721,24 +1846,25 @@ template <class Type, class Compare> void Comm::PartitionS(Vector<Type>& nodeLis
   }
   {  // Redistribute nodeList
     Vector<Type> nodeList_(rdsp[npes - 1] + rcnt[npes - 1]);
-    void* mpi_request = Ialltoallv_sparse(nodeList.begin(), scnt.begin(), sdsp.begin(), nodeList_.begin(), rcnt.begin(), rdsp.begin());
-    Wait(mpi_request);
+    auto mpi_request = Ialltoallv_sparse<true>(nodeList.begin(), scnt.begin(), sdsp.begin(), nodeList_.begin(), rcnt.begin(), rdsp.begin(), 0);
+    Wait(std::move(mpi_request));
     nodeList.Swap(nodeList_);
   }
 }
 
 template <class Type> void Comm::SortScatterIndex(const Vector<Type>& key, Vector<Long>& scatter_index, const Type* split_key_) const {
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
-  typedef SortPair<Type, Long> Pair_t;
+  typedef comm_detail::SortPair<Type, Long> Pair_t;
   Integer npes = Size();
 
-  Vector<Pair_t> parray(key.Dim());
+  ScratchBuf<Pair_t> parray_storage(key.Dim());
+  Vector<Pair_t> parray(parray_storage);
   {  // Build global index.
     Long glb_dsp = 0;
     Long loc_size = key.Dim();
     Scan(Ptr2ConstItr<Long>(&loc_size, 1), Ptr2Itr<Long>(&glb_dsp, 1), 1, CommOp::SUM);
     glb_dsp -= loc_size;
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < loc_size; i++) {
       parray[i].key = key[i];
       parray[i].data = glb_dsp + i;
@@ -748,16 +1874,21 @@ template <class Type> void Comm::SortScatterIndex(const Vector<Type>& key, Vecto
   Vector<Pair_t> psorted;
   HyperQuickSort(parray, psorted);
 
+  const auto copy_data = [&scatter_index](const Vector<Pair_t>& psorted) {
+    if (scatter_index.Dim() != psorted.Dim()) scatter_index.ReInit(psorted.Dim());
+    #pragma omp parallel for schedule(static)
+    for (Long i = 0; i < psorted.Dim(); i++) {
+      scatter_index[i] = psorted[i].data;
+    }
+  };
+
   if (npes > 1 && split_key_ != nullptr) {  // Partition data
-    Vector<Type> split_key(npes);
+    ScratchBuf<Type> split_key(npes);
     Allgather(Ptr2ConstItr<Type>(split_key_, 1), 1, split_key.begin(), 1);
 
-    Vector<Long> sendSz(npes);
-    Vector<Long> recvSz(npes);
-    Vector<Long> sendOff(npes);
-    Vector<Long> recvOff(npes);
+    ScratchBuf<Long> sendSz(npes), recvSz(npes), sendOff(npes), recvOff(npes);
     Long nlSize = psorted.Dim();
-    sendSz.SetZero();
+    memset(sendSz.begin(), 0, npes);
 
     if (nlSize > 0) {  // Compute sendSz
       // Determine processor range.
@@ -766,7 +1897,7 @@ template <class Type> void Comm::SortScatterIndex(const Vector<Type>& key, Vecto
       pid1 = (pid1 < 0 ? 0 : pid1);
       pid2 = (pid2 > npes ? npes : pid2);
 
-#pragma omp parallel for schedule(static)
+      #pragma omp parallel for schedule(static)
       for (Integer i = pid1; i < pid2; i++) {
         Pair_t p1;
         p1.key = split_key[i];
@@ -781,7 +1912,7 @@ template <class Type> void Comm::SortScatterIndex(const Vector<Type>& key, Vecto
     }
 
     // Exchange sendSz, recvSz
-    Alltoall<Long>(sendSz.begin(), 1, recvSz.begin(), 1);
+    Alltoall(sendSz.begin(), 1, recvSz.begin(), 1);
 
     // compute offsets ...
     {  // Compute sendOff, recvOff
@@ -793,24 +1924,21 @@ template <class Type> void Comm::SortScatterIndex(const Vector<Type>& key, Vecto
     }
 
     // perform All2All  ...
-    Vector<Pair_t> newNodes(recvSz[npes - 1] + recvOff[npes - 1]);
-    void* mpi_req = Ialltoallv_sparse<Pair_t>(psorted.begin(), sendSz.begin(), sendOff.begin(), newNodes.begin(), recvSz.begin(), recvOff.begin());
-    Wait(mpi_req);
+    ScratchBuf<Pair_t> newNodes_storage(recvSz[npes - 1] + recvOff[npes - 1]);
+    Vector<Pair_t> newNodes(newNodes_storage);
+    auto mpi_req = Ialltoallv_sparse<true>(psorted.begin(), sendSz.begin(), sendOff.begin(), newNodes.begin(), recvSz.begin(), recvOff.begin(), 0);
+    Wait(std::move(mpi_req));
 
-    // reset the pointer ...
-    psorted.Swap(newNodes);
-  }
-
-  scatter_index.ReInit(psorted.Dim());
-#pragma omp parallel for schedule(static)
-  for (Long i = 0; i < psorted.Dim(); i++) {
-    scatter_index[i] = psorted[i].data;
+    // copy data back to scatter_index
+    copy_data(newNodes);
+  } else {
+    copy_data(psorted);
   }
 }
 
 template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vector<Long>& scatter_index) const {
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
-  typedef SortPair<Long, Long> Pair_t;
+  typedef comm_detail::SortPair<Long, Long> Pair_t;
   Integer npes = Size(), rank = Rank();
 
   Long data_dim = 0;
@@ -822,7 +1950,7 @@ template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vecto
     StaticArray<Long, 2> loc_size;
     loc_size[0] = data_.Dim();
     loc_size[1] = recv_size;
-    Allreduce<Long>(loc_size, glb_size, 2, CommOp::SUM);
+    Allreduce(loc_size + 0, glb_size + 0, 2, CommOp::SUM);
     if (glb_size[0] == 0 || glb_size[1] == 0) return;  // Nothing to be done.
     data_dim = glb_size[0] / glb_size[1];
     SCTL_ASSERT(glb_size[0] == data_dim * glb_size[1]);
@@ -832,11 +1960,11 @@ template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vecto
   if (npes == 1) {  // Scatter directly
     Vector<Type> data;
     data.ReInit(recv_size * data_dim);
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       Long src_indx = scatter_index[i] * data_dim;
       Long trg_indx = i * data_dim;
-      for (Long j = 0; j < data_dim; j++) data[trg_indx + j] = data_[src_indx + j];
+      std::memcpy(&data[trg_indx], &data_[src_indx], data_dim * sizeof(Type));
     }
     data_.Swap(data);
     return;
@@ -854,27 +1982,23 @@ template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vecto
   Vector<Pair_t> psorted;
   {  // Sort scatter_index.
     psorted.ReInit(recv_size);
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       psorted[i].key = scatter_index[i];
       psorted[i].data = i;
     }
-    omp_par::merge_sort(psorted.begin(), psorted.begin() + recv_size);
+    omp_par::sample_sort(psorted.begin(), psorted.begin() + recv_size);
   }
 
-  Vector<Long> recv_indx(recv_size);
-  Vector<Long> send_indx(send_size);
-  Vector<Long> sendSz(npes);
-  Vector<Long> sendOff(npes);
-  Vector<Long> recvSz(npes);
-  Vector<Long> recvOff(npes);
+  ScratchBuf<Long> recv_indx(recv_size), send_indx(send_size);
+  ScratchBuf<Long> sendSz(npes), sendOff(npes), recvSz(npes), recvOff(npes);
   {  // Exchange send, recv indices.
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       recv_indx[i] = psorted[i].key;
     }
 
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < npes; i++) {
       Long start = std::lower_bound(recv_indx.begin(), recv_indx.begin() + recv_size, glb_scan[i]) - recv_indx.begin();
       Long end = (i + 1 < npes ? std::lower_bound(recv_indx.begin(), recv_indx.begin() + recv_size, glb_scan[i + 1]) - recv_indx.begin() : recv_size);
@@ -888,7 +2012,7 @@ template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vecto
     assert(sendOff[npes - 1] + sendSz[npes - 1] == send_size);
 
     Alltoallv(recv_indx.begin(), recvSz.begin(), recvOff.begin(), send_indx.begin(), sendSz.begin(), sendOff.begin());
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < send_size; i++) {
       assert(send_indx[i] >= glb_scan[rank]);
       send_indx[i] -= glb_scan[rank];
@@ -900,18 +2024,18 @@ template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vecto
   {  // Prepare send buffer
     send_buff.ReInit(send_size * data_dim);
     ConstIterator<Type> data = data_.begin();
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < send_size; i++) {
       Long src_indx = send_indx[i] * data_dim;
       Long trg_indx = i * data_dim;
-      for (Long j = 0; j < data_dim; j++) send_buff[trg_indx + j] = data[src_indx + j];
+      std::memcpy(&send_buff[trg_indx], &data[src_indx], data_dim * sizeof(Type));
     }
   }
 
   Vector<Type> recv_buff;
   {  // All2Allv
     recv_buff.ReInit(recv_size * data_dim);
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < npes; i++) {
       sendSz[i] *= data_dim;
       sendOff[i] *= data_dim;
@@ -924,18 +2048,18 @@ template <class Type> void Comm::ScatterForward(Vector<Type>& data_, const Vecto
   {  // Build output data.
     data_.ReInit(recv_size * data_dim);
     Iterator<Type> data = data_.begin();
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       Long src_indx = i * data_dim;
       Long trg_indx = psorted[i].data * data_dim;
-      for (Long j = 0; j < data_dim; j++) data[trg_indx + j] = recv_buff[src_indx + j];
+      std::memcpy(&data[trg_indx], &recv_buff[src_indx], data_dim * sizeof(Type));
     }
   }
 }
 
 template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vector<Long>& scatter_index_, Long loc_size_) const {
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
-  typedef SortPair<Long, Long> Pair_t;
+  typedef comm_detail::SortPair<Long, Long> Pair_t;
   Integer npes = Size(), rank = Rank();
 
   Long data_dim = 0;
@@ -948,7 +2072,7 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
     loc_size[0] = data_.Dim();
     loc_size[1] = scatter_index_.Dim();
     loc_size[2] = recv_size;
-    Allreduce<Long>(loc_size, glb_size, 3, CommOp::SUM);
+    Allreduce(loc_size + 0, glb_size + 0, 3, CommOp::SUM);
     if (glb_size[0] == 0 || glb_size[1] == 0) return;  // Nothing to be done.
 
     SCTL_ASSERT(glb_size[0] % glb_size[1] == 0);
@@ -957,19 +2081,24 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
     SCTL_ASSERT(loc_size[0] % data_dim == 0);
     send_size = loc_size[0] / data_dim;
 
-    if (glb_size[0] != glb_size[2] * data_dim) {
-      recv_size = (((rank + 1) * (glb_size[0] / data_dim)) / npes) - ((rank * (glb_size[0] / data_dim)) / npes);
+    if (glb_size[2] == 0) { // partition uniformly
+      recv_size = (((rank + 1) * glb_size[1]) / npes) - ((rank * glb_size[1]) / npes);
+    } else {
+      SCTL_ASSERT(glb_size[2] % glb_size[1] == 0);
+      const Long dof = glb_size[2] / glb_size[1];
+      SCTL_ASSERT(loc_size[2] % dof == 0);
+      recv_size = loc_size[2] / dof;
     }
   }
 
   if (npes == 1) {  // Scatter directly
     Vector<Type> data;
     data.ReInit(recv_size * data_dim);
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       Long src_indx = i * data_dim;
       Long trg_indx = scatter_index_[i] * data_dim;
-      for (Long j = 0; j < data_dim; j++) data[trg_indx + j] = data_[src_indx + j];
+      std::memcpy(&data[trg_indx], &data_[src_indx], data_dim * sizeof(Type));
     }
     data_.Swap(data);
     return;
@@ -982,34 +2111,31 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
     StaticArray<Long, 2> loc_size;
     loc_size[0] = data_.Dim() / data_dim;
     loc_size[1] = scatter_index_.Dim();
-    Scan<Long>(loc_size, glb_rank, 2, CommOp::SUM);
-    Allreduce<Long>(loc_size, glb_size, 2, CommOp::SUM);
+    Scan(loc_size + 0, glb_rank + 0, 2, CommOp::SUM);
+    Allreduce(loc_size + 0, glb_size + 0, 2, CommOp::SUM);
     SCTL_ASSERT(glb_size[0] == glb_size[1]);
     glb_rank[0] -= loc_size[0];
     glb_rank[1] -= loc_size[1];
 
-    Vector<Long> glb_scan0(npes + 1);
-    Vector<Long> glb_scan1(npes + 1);
-    Allgather<Long>(glb_rank + 0, 1, glb_scan0.begin(), 1);
-    Allgather<Long>(glb_rank + 1, 1, glb_scan1.begin(), 1);
+    ScratchBuf<Long> glb_scan0(npes + 1), glb_scan1(npes + 1);
+    Allgather(glb_rank + 0, 1, glb_scan0.begin(), 1);
+    Allgather(glb_rank + 1, 1, glb_scan1.begin(), 1);
     glb_scan0[npes] = glb_size[0];
     glb_scan1[npes] = glb_size[1];
 
     if (loc_size[0] != loc_size[1] || glb_rank[0] != glb_rank[1]) {  // Repartition scatter_index
       scatter_index.ReInit(loc_size[0]);
 
-      Vector<Long> send_dsp(npes + 1);
-      Vector<Long> recv_dsp(npes + 1);
-#pragma omp parallel for schedule(static)
+      ScratchBuf<Long> send_dsp(npes + 1), recv_dsp(npes + 1);
+      #pragma omp parallel for schedule(static)
       for (Integer i = 0; i <= npes; i++) {
         send_dsp[i] = std::min(std::max(glb_scan0[i], glb_rank[1]), glb_rank[1] + loc_size[1]) - glb_rank[1];
         recv_dsp[i] = std::min(std::max(glb_scan1[i], glb_rank[0]), glb_rank[0] + loc_size[0]) - glb_rank[0];
       }
 
       // Long commCnt=0;
-      Vector<Long> send_cnt(npes + 0);
-      Vector<Long> recv_cnt(npes + 0);
-#pragma omp parallel for schedule(static)  // reduction(+:commCnt)
+      ScratchBuf<Long> send_cnt(npes + 0), recv_cnt(npes + 0);
+      #pragma omp parallel for schedule(static)  // reduction(+:commCnt)
       for (Integer i = 0; i < npes; i++) {
         send_cnt[i] = send_dsp[i + 1] - send_dsp[i];
         recv_cnt[i] = recv_dsp[i + 1] - recv_dsp[i];
@@ -1017,14 +2143,14 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
         // if(recv_cnt[i] && i!=rank) commCnt++;
       }
 
-      void* mpi_req = Ialltoallv_sparse<Long>(scatter_index_.begin(), send_cnt.begin(), send_dsp.begin(), scatter_index.begin(), recv_cnt.begin(), recv_dsp.begin(), 0);
-      Wait(mpi_req);
+      auto mpi_req = Ialltoallv_sparse<true>(scatter_index_.begin(), send_cnt.begin(), send_dsp.begin(), scatter_index.begin(), recv_cnt.begin(), recv_dsp.begin(), 0);
+      Wait(std::move(mpi_req));
     } else {
       scatter_index.ReInit(scatter_index_.Dim(), (Iterator<Long>)scatter_index_.begin(), false);
     }
   }
 
-  Vector<Long> glb_scan(npes);
+  ScratchBuf<Long> glb_scan(npes);
   {  // Global data size.
     Long glb_rank = 0;
     Scan(Ptr2ConstItr<Long>(&recv_size, 1), Ptr2Itr<Long>(&glb_rank, 1), 1, CommOp::SUM);
@@ -1032,29 +2158,25 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
     Allgather(Ptr2ConstItr<Long>(&glb_rank, 1), 1, glb_scan.begin(), 1);
   }
 
-  Vector<Pair_t> psorted(send_size);
+  ScratchBuf<Pair_t> psorted(send_size);
   {  // Sort scatter_index.
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < send_size; i++) {
       psorted[i].key = scatter_index[i];
       psorted[i].data = i;
     }
-    omp_par::merge_sort(psorted.begin(), psorted.begin() + send_size);
+    omp_par::sample_sort(psorted.begin(), psorted.begin() + send_size);
   }
 
-  Vector<Long> recv_indx(recv_size);
-  Vector<Long> send_indx(send_size);
-  Vector<Long> sendSz(npes);
-  Vector<Long> sendOff(npes);
-  Vector<Long> recvSz(npes);
-  Vector<Long> recvOff(npes);
+  ScratchBuf<Long> recv_indx(recv_size), send_indx(send_size);
+  ScratchBuf<Long> sendSz(npes), sendOff(npes), recvSz(npes), recvOff(npes);
   {  // Exchange send, recv indices.
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < send_size; i++) {
       send_indx[i] = psorted[i].key;
     }
 
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < npes; i++) {
       Long start = std::lower_bound(send_indx.begin(), send_indx.begin() + send_size, glb_scan[i]) - send_indx.begin();
       Long end = (i + 1 < npes ? std::lower_bound(send_indx.begin(), send_indx.begin() + send_size, glb_scan[i + 1]) - send_indx.begin() : send_size);
@@ -1068,7 +2190,7 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
     assert(recvOff[npes - 1] + recvSz[npes - 1] == recv_size);
 
     Alltoallv(send_indx.begin(), sendSz.begin(), sendOff.begin(), recv_indx.begin(), recvSz.begin(), recvOff.begin());
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       assert(recv_indx[i] >= glb_scan[rank]);
       recv_indx[i] -= glb_scan[rank];
@@ -1080,18 +2202,18 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
   {  // Prepare send buffer
     send_buff.ReInit(send_size * data_dim);
     ConstIterator<Type> data = data_.begin();
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < send_size; i++) {
       Long src_indx = psorted[i].data * data_dim;
       Long trg_indx = i * data_dim;
-      for (Long j = 0; j < data_dim; j++) send_buff[trg_indx + j] = data[src_indx + j];
+      std::memcpy(&send_buff[trg_indx], &data[src_indx], data_dim * sizeof(Type));
     }
   }
 
   Vector<Type> recv_buff;
   {  // All2Allv
     recv_buff.ReInit(recv_size * data_dim);
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Integer i = 0; i < npes; i++) {
       sendSz[i] *= data_dim;
       sendOff[i] *= data_dim;
@@ -1104,32 +2226,94 @@ template <class Type> void Comm::ScatterReverse(Vector<Type>& data_, const Vecto
   {  // Build output data.
     data_.ReInit(recv_size * data_dim);
     Iterator<Type> data = data_.begin();
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < recv_size; i++) {
       Long src_indx = i * data_dim;
       Long trg_indx = recv_indx[i] * data_dim;
-      for (Long j = 0; j < data_dim; j++) data[trg_indx + j] = recv_buff[src_indx + j];
+      std::memcpy(&data[trg_indx], &recv_buff[src_indx], data_dim * sizeof(Type));
     }
   }
 }
 
 #ifdef SCTL_HAVE_MPI
-inline Vector<MPI_Request>* Comm::NewReq() const {
-  if (req.empty()) req.push(new Vector<MPI_Request>);
-  Vector<MPI_Request>& request = *(Vector<MPI_Request>*)req.top();
-  req.pop();
-  return &request;
+template <CommOp op, class Type> inline MPI_Op Comm::GetMPIOp() {  // compile-time op: only the selected op's reduction fn is instantiated
+  if constexpr (op == CommOp::SUM) return CommDatatype<Type>::sum();
+  else if constexpr (op == CommOp::MIN) return CommDatatype<Type>::min();
+  else if constexpr (op == CommOp::MAX) return CommDatatype<Type>::max();
+  else return MPI_OP_NULL;
+}
+template <class Type> inline MPI_Op Comm::GetMPIOp(CommOp op) {  // runtime op: dispatch to the compile-time overloads
+  switch (op) {
+    case CommOp::SUM: return GetMPIOp<CommOp::SUM, Type>();
+    case CommOp::MIN: return GetMPIOp<CommOp::MIN, Type>();
+    case CommOp::MAX: return GetMPIOp<CommOp::MAX, Type>();
+    default:          return MPI_OP_NULL;
+  }
 }
 
-inline void Comm::Init(const MPI_Comm mpi_comm) {
-  #pragma omp critical(SCTL_COMM_DUP)
-  MPI_Comm_dup(mpi_comm, &mpi_comm_);
-  MPI_Comm_rank(mpi_comm_, &mpi_rank_);
-  MPI_Comm_size(mpi_comm_, &mpi_size_);
+template <class Type> inline MPI_Datatype Comm::MPIDatatype() {
+  return CommDatatype<Type>::value();
+}
+
+inline void Comm::RegisterDatatype(MPI_Datatype datatype) {
+  #pragma omp critical(SCTL_COMM_HANDLE_REG)
+  {
+    DatatypeRegistry().push_back(datatype);
+  }
+}
+
+inline void Comm::RegisterOp(MPI_Op op) {
+  #pragma omp critical(SCTL_COMM_HANDLE_REG)
+  {
+    OpRegistry().push_back(op);
+  }
+}
+
+inline void Comm::FreeRegisteredHandles() {
+  #pragma omp critical(SCTL_COMM_HANDLE_REG)
+  {
+    std::vector<MPI_Op>& op_registry = OpRegistry();
+    std::vector<MPI_Datatype>& datatype_registry = DatatypeRegistry();
+    for (std::size_t i = 0; i < op_registry.size(); i++) {
+      if (op_registry[i] != MPI_OP_NULL) {
+        MPI_Op_free(&op_registry[i]);
+      }
+    }
+    op_registry.clear();
+    for (std::size_t i = 0; i < datatype_registry.size(); i++) {
+      if (datatype_registry[i] != MPI_DATATYPE_NULL) {
+        MPI_Type_free(&datatype_registry[i]);
+      }
+    }
+    datatype_registry.clear();
+  }
+}
+
+inline std::vector<MPI_Datatype>& Comm::DatatypeRegistry() {
+  static std::vector<MPI_Datatype> registry;
+  return registry;
+}
+
+inline std::vector<MPI_Op>& Comm::OpRegistry() {
+  static std::vector<MPI_Op> registry;
+  return registry;
+}
+
+inline Vector<MPI_Request>& Comm::NewReq(Long request_count) const {
+  Vector<MPI_Request>* request;
+  #pragma omp critical(SCTL_COMM_REQ)
+  {
+    if (impl_->req.empty()) impl_->req.push(new Vector<MPI_Request>);
+    request = (Vector<MPI_Request>*)impl_->req.top();
+    impl_->req.pop();
+  }
+  request->ReInit(request_count);
+  return *request;
 }
 
 inline void Comm::DelReq(Vector<MPI_Request>* req_ptr) const {
-  if (req_ptr) req.push(req_ptr);
+  #pragma omp critical(SCTL_COMM_REQ)
+  if (req_ptr) impl_->req.push(req_ptr);
 }
 
 #define SCTL_HS_MPIDATATYPE(CTYPE, MPITYPE)              \
@@ -1156,38 +2340,52 @@ SCTL_HS_MPIDATATYPE(unsigned char, MPI_UNSIGNED_CHAR);
 #undef SCTL_HS_MPIDATATYPE
 #endif
 
-template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type>& arr_, Vector<Type>& SortedElem, Compare comp) const {  // O( ((N/p)+log(p))*(log(N/p)+log(p)) )
+namespace comm_detail {
+
+// Local-phase sort for SampleSort, HyperQuickSort and sort_scatter_detail: omp_par picks the sort,
+// and only the default ordering may take its radix path.
+template <class Type, class Compare> void LocalSort(ConstIterator<Type> in, Iterator<Type> out, Long N, Compare comp) {
+  if constexpr (std::is_same<Compare, std::less<Type>>::value) {
+    omp_par::sort(in, out, N);
+    SCTL_UNUSED(comp);
+  } else {
+    omp_par::sort(in, out, N, comp);
+  }
+}
+
+}  // namespace comm_detail
+
+template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type>& arr_, Vector<Type>& SortedElem, Compare comp, bool partition) const {  // O( ((N/p)+log(p))*(log(N/p)+log(p)) )
   static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+  SCTL_UNUSED(partition);
 #ifdef SCTL_HAVE_MPI
+
   Integer npes, myrank, omp_p;
   {  // Get comm size and rank.
     npes = Size();
     myrank = Rank();
-    omp_p = omp_get_max_threads();
+    omp_p = SCTL_GET_MAX_THREADS();
   }
-  srand(myrank);
+
+  if (npes == 1) {  // SortedElem <--- local_sort(arr_)
+    if (SortedElem.Dim() != arr_.Dim()) SortedElem.ReInit(arr_.Dim());
+    comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
+    return;
+  }
 
   Long totSize;
   {                 // Local and global sizes. O(log p)
     Long nelem = arr_.Dim();
-    Allreduce<Long>(Ptr2ConstItr<Long>(&nelem, 1), Ptr2Itr<Long>(&totSize, 1), 1, CommOp::SUM);
+    Allreduce(Ptr2ConstItr<Long>(&nelem, 1), Ptr2Itr<Long>(&totSize, 1), 1, CommOp::SUM);
   }
 
-  if (npes == 1) {  // SortedElem <--- local_sort(arr_)
-    SortedElem = arr_;
-    omp_par::merge_sort(SortedElem.begin(), SortedElem.end(), comp);
-    return;
-  }
-
-  Vector<Type> arr;
-  {  // arr <-- local_sort(arr_)
-    arr = arr_;
-    omp_par::merge_sort(arr.begin(), arr.end(), comp);
-  }
+  Vector<Type> arr(arr_.Dim());
+  comm_detail::LocalSort<Type>(arr_.begin(), arr.begin(), arr_.Dim(), comp);  // arr <-- local_sort(arr_)
 
   Vector<Type> nbuff, nbuff_ext, rbuff, rbuff_ext;  // Allocate memory.
-  MPI_Comm comm = mpi_comm_;                        // Copy comm
+  MPI_Comm comm = impl_->mpi_comm_;                        // Copy comm
   bool free_comm = false;                           // Flag to free comm.
+  srand(myrank);
 
   // Binary split and merge in each iteration.
   while (npes > 1 && totSize > 0) {  // O(log p) iterations.
@@ -1209,12 +2407,12 @@ template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type
           SCTL_ASSERT(glb_splt_count);
         }
 
-        Vector<Type> splitters(splt_count);
+        ScratchBuf<Type> splitters(splt_count);
         for (Integer i = 0; i < splt_count; i++) {
           splitters[i] = arr[rand() % nelem];
         }
 
-        Vector<Integer> glb_splt_cnts(npes), glb_splt_disp(npes);
+        ScratchBuf<Integer> glb_splt_cnts(npes), glb_splt_disp(npes);
         {  // Set glb_splt_cnts, glb_splt_disp
           MPI_Allgather(&splt_count, 1, CommDatatype<Integer>::value(), &glb_splt_cnts[0], 1, CommDatatype<Integer>::value(), comm);
           glb_splt_disp[0] = 0;
@@ -1224,7 +2422,7 @@ template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type
 
         {  // Gather all splitters. O( log(p) )
           glb_splitters.ReInit(glb_splt_count);
-          Vector<int> glb_splt_cnts_(npes), glb_splt_disp_(npes);
+          ScratchBuf<int> glb_splt_cnts_(npes), glb_splt_disp_(npes);
           for (Integer i = 0; i < npes; i++) {
             glb_splt_cnts_[i] = glb_splt_cnts[i];
             glb_splt_disp_[i] = glb_splt_disp[i];
@@ -1234,15 +2432,15 @@ template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type
       }
 
       // Determine split key. O( log(N/p) + log(p) )
-      Vector<Long> lrank(glb_splt_count);
+      ScratchBuf<Long> lrank(glb_splt_count);
       {  // Compute local rank
-#pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static)
         for (Integer i = 0; i < glb_splt_count; i++) {
           lrank[i] = std::lower_bound(arr.begin(), arr.end(), glb_splitters[i], comp) - arr.begin();
         }
       }
 
-      Vector<Long> grank(glb_splt_count);
+      ScratchBuf<Long> grank(glb_splt_count);
       {  // Compute global rank
         MPI_Allreduce(&lrank[0], &grank[0], glb_splt_count, CommDatatype<Long>::value(), CommDatatype<Long>::sum(), comm);
       }
@@ -1299,8 +2497,26 @@ template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type
         rbuff.ReInit(rsize);
         rbuff_ext.ReInit(ext_rsize);
         MPI_Status status;
-        MPI_Sendrecv((ssize ? &sbuff[0] : nullptr), ssize, CommDatatype<Type>::value(), partner, 0, (rsize ? &rbuff[0] : nullptr), rsize, CommDatatype<Type>::value(), partner, 0, comm, &status);
-        if (extra_partner) MPI_Sendrecv(nullptr, 0, CommDatatype<Type>::value(), split_id, 0, (ext_rsize ? &rbuff_ext[0] : nullptr), ext_rsize, CommDatatype<Type>::value(), split_id, 0, comm, &status);
+        const Long peer_chunk_count = std::max<Long>(comm_detail::MPINumChunks(ssize), comm_detail::MPINumChunks(rsize));
+        SCTL_ASSERT(peer_chunk_count == 0 || peer_chunk_count - 1 <= static_cast<Long>(impl_->mpi_tag_ub_));
+        Long soff = 0, roff = 0;
+        for (Long chunk_idx = 0; chunk_idx < peer_chunk_count; chunk_idx++) {
+          const Long send_chunk = std::min<Long>(ssize - soff, comm_detail::MPIIntLimit());
+          const Long recv_chunk = std::min<Long>(rsize - roff, comm_detail::MPIIntLimit());
+          MPI_Sendrecv((send_chunk ? &sbuff[soff] : nullptr), comm_detail::MPIAsCount(send_chunk), CommDatatype<Type>::value(), partner, comm_detail::MPIAsInt(chunk_idx), (recv_chunk ? &rbuff[roff] : nullptr), comm_detail::MPIAsCount(recv_chunk), CommDatatype<Type>::value(), partner, comm_detail::MPIAsInt(chunk_idx), comm, &status);
+          soff += send_chunk;
+          roff += recv_chunk;
+        }
+        if (extra_partner) {
+          const Long extra_chunk_count = comm_detail::MPINumChunks(ext_rsize);
+          SCTL_ASSERT(extra_chunk_count == 0 || extra_chunk_count - 1 <= static_cast<Long>(impl_->mpi_tag_ub_));
+          Long roff_ext = 0;
+          for (Long chunk_idx = 0; chunk_idx < extra_chunk_count; chunk_idx++) {
+            const Long recv_chunk = std::min<Long>(ext_rsize - roff_ext, comm_detail::MPIIntLimit());
+            MPI_Sendrecv(nullptr, 0, CommDatatype<Type>::value(), split_id, comm_detail::MPIAsInt(chunk_idx), (recv_chunk ? &rbuff_ext[roff_ext] : nullptr), comm_detail::MPIAsCount(recv_chunk), CommDatatype<Type>::value(), split_id, comm_detail::MPIAsInt(chunk_idx), comm, &status);
+            roff_ext += recv_chunk;
+          }
+        }
       }
 
       {  // nbuff <-- merge(lbuff, rbuff, rbuff_ext)
@@ -1339,11 +2555,339 @@ template <class Type, class Compare> void Comm::HyperQuickSort(const Vector<Type
   #pragma omp critical(SCTL_COMM_DUP)
   if (free_comm) MPI_Comm_free(&comm);
 
-  SortedElem = arr;
-  PartitionW<Type>(SortedElem);
+  if (SortedElem.Dim() != arr.Dim()) SortedElem.ReInit(arr.Dim());
+  #pragma omp parallel for schedule(static)
+  for (Long i = 0; i < arr.Dim(); i++) SortedElem[i] = arr[i];
+
+  if (partition) PartitionW<Type>(SortedElem);
 #else
-  SortedElem = arr_;
-  std::sort(SortedElem.begin(), SortedElem.begin() + SortedElem.Dim(), comp);
+  if (SortedElem.Dim() != arr_.Dim()) SortedElem.ReInit(arr_.Dim());
+  comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
+#endif
+}
+
+template <class Type, class Compare> Type Comm::DetermineSplitter(const Vector<Type>& loc, Long totSize, Compare comp) const {
+  // This rank's lower-boundary splitter for a balanced partition (global rank r*totSize/npes), by
+  // boundary-aware exact-rank histogramming (mirrors gpu_tree::detail::determineSplitters). Seed each
+  // of the np-1 cuts from the straddling pair of per-rank data boundaries, then iterate probe ->
+  // gather candidates -> exact global ranks -> refine, until every cut is within tol. Un-splittable
+  // cuts (target inside a duplicate run wider than tol) are detected exactly via the global upper_bound
+  // of the bracket's low end and frozen at the nearest achievable endpoint. Uses only `comp` and actual
+  // elements, so balance is independent of the data distribution. State is replicated on every rank;
+  // rank 0's return is unused by DistributeAndMerge.
+#ifdef SCTL_HAVE_MPI
+  constexpr Integer MAXIT = 50;
+  constexpr Integer budget = 16; // probes/round budget
+  constexpr double tolfrac = 0.02; // 2% load-balance tolerance
+
+  const Long rank = Rank();
+  const Long np = Size();
+
+  const Long ns = np - 1;
+  const Long Nl = loc.Dim();
+  Type gmin = Nl ? loc[0] : Type();
+  if (!ns || !totSize) return gmin;
+
+  const Long Ng = totSize;
+  const Long tol = std::max<Long>(1, Long(tolfrac * double(Ng) / double(np)));   // load-balance tolerance
+  uint64_t rng = uint64_t(rank) * 0x9e3779b97f4a7c15ULL + 0x123456789abcdefULL;
+  const auto next = [&rng]() {
+    uint64_t z = (rng += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+  };
+
+  ScratchBuf<Type> best(ns); // per-cut best splitter (this rank returns best[rank-1])
+  const auto local_ranks = [&loc, &comp]
+                           (Iterator<Long> r, ConstIterator<Type> q, const Long n, const bool upper = false) {  // batched binary search
+    if (!n) return;
+    #pragma omp parallel for schedule(static) if(n > 512)
+    for (Long i = 0; i < n; i++) r[i] = (upper ? std::upper_bound(loc.begin(), loc.end(), q[i], comp)
+                                               : std::lower_bound(loc.begin(), loc.end(), q[i], comp)) - loc.begin();
+  };
+
+  ScratchBuf<Type> bracket(2*ns);
+  ScratchBuf<Long> bracket_rl(2*ns), bracket_rg(2*ns);
+  [this, np, ns, Nl, Ng, &loc, &comp, &bracket, &bracket_rl, &bracket_rg, &local_ranks, &gmin]() { // Set bracket, bracket_rl, bracket_rg (and gmin)
+    ScratchBuf<Long> rcnt(np), rdsp(np);
+    const StaticArray<Long,1> scnt{Nl ? 2 : 0};
+    Allgather(scnt+0, 1, rcnt.begin(), 1);
+    std::exclusive_scan(rcnt.begin(), rcnt.end(), rdsp.begin(), Long(0));
+
+    const StaticArray<Type,2> sbuf{Nl?loc[0]:Type{}, Nl?loc[Nl-1]:Type{}};
+    ScratchBuf<Type> bnd(rdsp[np-1] + rcnt[np-1]), bnd2(rdsp[np-1] + rcnt[np-1]);
+    Allgatherv(sbuf+0, scnt[0], bnd.begin(), rcnt.begin(), rdsp.begin());
+    omp_par::merge_sort(bnd.begin(), bnd.end(), comp);
+    const Long B = omp_par::dedup_sorted(bnd.begin(), bnd2.begin(), bnd.Dim(), comp);  // out-of-place: bnd -> bnd2
+    if (B) gmin = bnd2[0];
+
+    ScratchBuf<Long> lr_b(B), gr_b(B); // each boundary's local then exact global rank
+    local_ranks(lr_b.begin(), bnd2.begin(), B);
+    Allreduce(lr_b.begin(), gr_b.begin(), B, CommOp::SUM);
+
+    #pragma omp parallel for schedule(static) if(ns > 512)
+    for (Long i = 0; i < ns; i++) {                              // straddling boundary pair for target rank t
+      const Long t = (i + 1) * Ng / np;
+      const Long up = std::min(B-1, std::max<Long>(1, std::lower_bound(gr_b.begin(), gr_b.begin()+B, t) - gr_b.begin()));
+      const Long lo = std::max<Long>(0, up - 1);                 // lo>=0 even when B==1 (degenerate all-equal data)
+      bracket[i*2+0] = bnd2[lo]; bracket_rl[i*2+0] = lr_b[lo]; bracket_rg[i*2+0] = gr_b[lo];
+      bracket[i*2+1] = bnd2[up]; bracket_rl[i*2+1] = lr_b[up]; bracket_rg[i*2+1] = gr_b[up];
+    }
+  }();
+
+  ScratchBuf<char> state(ns);
+  enum CutState : char { ACTIVE = 0, DONE = 1, DONE_UPPER = 2 };
+  std::fill(state.begin(), state.end(), (char)ACTIVE);
+
+  const auto gather_pt = [&loc]
+                         (Vector<Type>& out, const Vector<Long>& idxs) {  // out: loc[idxs]; in: idxs
+    const Long n = idxs.Dim();
+    if (out.Dim() != n) out.ReInit(n);
+    for (Long k = 0; k < n; k++) out[k] = loc[idxs[k]];
+  };
+
+  // out: idxs (this rank's chosen local indices), local_cand (their point values). budget is constexpr -> no capture.
+  const auto probe = [ns, np, Ng, &state, &bracket, &bracket_rl, &bracket_rg, &next, &gather_pt]
+                     (Vector<Long>& idxs, Vector<Type>& local_cand) {
+    const double budget_ = [&state, ns]() {  // concentrate the round's budget onto the shrinking active set
+      Long active_cnt = 0;
+      for (Long i = 0; i < ns; i++) active_cnt += (state[i] ? 0 : 1);
+      return double(budget) * double(ns) / std::max<Long>(1, active_cnt);
+    }();
+
+    idxs.ReInit(0);
+    const Long start = Long(next() % (uint64_t)ns);
+    for (Long j = 0; j < ns && idxs.Dim() < 2*budget; j++) {
+      const Long i = (start + j) % ns;
+      const Long rl0 = bracket_rl[i*2+0], rl1 = bracket_rl[i*2+1];
+      const Long rg0 = bracket_rg[i*2+0], rg1 = bracket_rg[i*2+1];
+      if (state[i] || rl1 == rl0) continue;
+
+      const double share = double(rl1 - rl0) / double(rg1 - rg0);
+      const double u = double(next() >> 11) * 0x1p-53; // uniform [0,1): top 53 bits scaled by 2^-53
+      if (u >= std::min(1.0, double(budget_) * share)) continue;
+
+      const Long opt_rank = (i + 1) * Ng / np;
+      const Long idx = rl0 + (rl1 - rl0) * (opt_rank - rg0) / (rg1 - rg0); // interpolate to the target
+      idxs.PushBack(std::min(rl1 - 1, std::max(rl0, idx)));
+    }
+    gather_pt(local_cand, idxs);
+  };
+
+  // in: local_cand (this rank's probes); out: cand (all ranks' probes ++ active brackets, sorted+deduped). ret: |cand|.
+  const auto gather_candidates = [this, np, ns, &state, &bracket, &comp]
+                                 (Vector<Type>& cand, const Vector<Type>& local_cand) -> Long {
+    const Long mloc = local_cand.Dim();
+    ScratchBuf<Long> cntb(np), dspb(np);
+    Allgather(Ptr2ConstItr<Long>(&mloc,1), 1, cntb.begin(), 1);
+    std::exclusive_scan(cntb.begin(), cntb.end(), dspb.begin(), Long(0));
+    Long S = dspb[np-1] + cntb[np-1];
+
+    ScratchBuf<Type> cand_raw(S + 2*ns);  // gather + sort here, then dedup out-of-place into cand
+    Allgatherv((mloc ? local_cand.begin() : NullIterator<Type>()), mloc,
+               cand_raw.begin(), cntb.begin(), dspb.begin());
+    for (Long i = 0; i < ns; i++) if (!state[i]) { // append active brackets
+      cand_raw[S++] = bracket[i*2+0];
+      cand_raw[S++] = bracket[i*2+1];
+    }
+
+    cand.ReInit(S); // capacity for the dedup output (>= result)
+    omp_par::merge_sort(cand_raw.begin(), cand_raw.begin() + S, comp);
+    return omp_par::dedup_sorted(cand_raw.begin(), cand.begin(), S, comp);  // cand_raw -> cand[0..ret)
+  };
+
+  // in: cand, S; out: lr, gr sized S+ns. gr[0,S) = exact global ranks of cand;
+  // gr[S+i] = global upper_bound rank of bracket[i*2+0] (end of blo's duplicate run), folded into the same Allreduce.
+  const auto global_ranks = [this, ns, &local_ranks, &bracket]
+                            (ScratchBuf<Long>& lr, ScratchBuf<Long>& gr, const Vector<Type>& cand, Long S) {
+    SCTL_ASSERT(lr.Dim() >= S+ns);
+    SCTL_ASSERT(gr.Dim() >= S+ns);
+
+    ScratchBuf<Type> blo(ns);
+    for (Long i = 0; i < ns; i++) blo[i] = bracket[i*2+0];
+    local_ranks(lr.begin(), cand.begin(), S);
+    local_ranks(lr.begin()+S, blo.begin(), ns, /*upper*/true);
+    Allreduce(lr.begin(), gr.begin(), S+ns, CommOp::SUM);
+  };
+
+  // in: cand, lr, gr (sized S+ns), S; out: best + updated bracket*/state. ret: whether any cut is still active.
+  const auto refine = [/*out:*/ &best, &state, &bracket, &bracket_rl, &bracket_rg,  /*in:*/ ns, Ng, np, tol]
+                      (const Vector<Type>& cand, const ScratchBuf<Long>& lr, const ScratchBuf<Long>& gr, Long S) -> bool {
+    bool anyactive = false;
+    #pragma omp parallel for schedule(static) reduction(||:anyactive) if(ns > 512)
+    for (Long i = 0; i < ns; i++) { // refine each active bracket toward its target rank
+      if (state[i]) continue;
+      const Long t = (i + 1) * Ng / np;
+      const Long up = std::lower_bound(gr.begin(), gr.begin()+S, t) - gr.begin(), lo = up - 1;
+
+      const Long errlo = (lo >= 0) ? t - gr[lo] : t;
+      const Long errup = (up < S) ? gr[up] - t : (Ng - t);
+      best[i] = (errlo <= errup) ? cand[std::max<Long>(0,lo)] : cand[std::min<Long>(S-1,up)];
+      if (lo < 0 || up >= S || std::min(errlo,errup) <= tol) {
+        state[i] = DONE;
+        continue;
+      }
+
+      if (gr[up] - gr[lo] < bracket_rg[i*2+1] - bracket_rg[i*2+0]) {  // bracket shrank: tighten toward target
+        bracket[i*2+0]    = cand[lo]; bracket[i*2+1]    = cand[up];
+        bracket_rl[i*2+0] = lr[lo];   bracket_rl[i*2+1] = lr[up];
+        bracket_rg[i*2+0] = gr[lo];   bracket_rg[i*2+1] = gr[up];
+        anyactive = true; continue;
+      }
+
+      // no shrink: cand[lo]==blo. Exact un-splittable test on blo's duplicate run [L,U).
+      const Long L = gr[lo], U = gr[S+i];  // L = global lower_bound(blo), U = global upper_bound(blo)
+      if (U <= t) { // run ends before target -> undersampled this round, keep probing
+        anyactive = true;
+        continue;
+      }
+      // run straddles target: nearest endpoint is the best achievable.
+      if (t - L <= U - t) { best[i] = cand[lo]; state[i] = DONE; } // nearer endpoint L: splitter = blo (value in hand)
+      else                  state[i] = DONE_UPPER;                 // nearer endpoint U: successor of blo (resolved at loop end)
+    }
+    return anyactive;
+  };
+
+  Vector<Long> idxs;
+  Vector<Type> local_cand, cand;
+  for (Integer it = 0; it < MAXIT; it++) { // iterate: [ probe -> gather -> global-rank -> refine ] until every cut is within tol
+    probe(idxs, local_cand);
+    const Long S = gather_candidates(cand, local_cand);
+    ScratchBuf<Long> gr(S+ns), lr(S+ns);
+    global_ranks(lr, gr, cand, S);
+    if (!refine(cand, lr, gr, S)) break;
+  }
+
+  { // resolve upper-side frozen cuts: best = successor of blo (smallest global value > blo under comp)
+    Long m = 0;
+    ScratchBuf<Long> up_cuts(ns);
+    for (Long i = 0; i < ns; i++) if (state[i] == DONE_UPPER) up_cuts[m++] = i;
+    if (m) {
+      ScratchBuf<Long> uidx(m);
+      { // uidx <-- local index of first point > blo
+        ScratchBuf<Type> bvals(m);
+        for (Long k = 0; k < m; k++) bvals[k] = bracket[up_cuts[k]*2+0];
+        local_ranks(uidx.begin(), bvals.begin(), m, /*upper*/true);
+      }
+
+      ScratchBuf<Type> sloc(m);
+      { // sloc <-- successor value loc[uidx] (or bhi where this rank has no point > blo)
+        ScratchBuf<Long> gidx(m);
+        for (Long k = 0; k < m; k++) gidx[k] = std::min(uidx[k], Nl-1);
+        Vector<Type> sloc_v(sloc);
+        if (Nl > 0) gather_pt(sloc_v, Vector<Long>(gidx));
+        for (Long k = 0; k < m; k++) sloc[k] = (Nl > 0 && uidx[k] < Nl) ? sloc[k] : bracket[up_cuts[k]*2+1];
+      }
+
+      // global min of the per-rank successors
+      if constexpr (std::is_same<Compare, std::less<Type>>::value) {  // default order: one MIN-Allreduce, O(m)
+        ScratchBuf<Type> sglob(m);
+        Allreduce<CommOp::MIN>(sloc.begin(), sglob.begin(), m);
+        for (Long k = 0; k < m; k++) best[up_cuts[k]] = sglob[k];
+      } else {  // custom comp: Allgather the per-rank successors, reduce locally under comp
+        ScratchBuf<Type> sall(m * np);
+        Allgather(sloc.begin(), m, sall.begin(), m);
+        for (Long k = 0; k < m; k++) {
+          Type mn = sall[k];
+          for (Long p = 1; p < np; p++) if (comp(sall[p*m + k], mn)) mn = sall[p*m + k];
+          best[up_cuts[k]] = mn;
+        }
+      }
+    }
+  }
+  return rank == 0 ? gmin : best[rank - 1];
+#else
+  SCTL_UNUSED(totSize);
+  SCTL_UNUSED(comp);
+  return loc.Dim() ? loc[0] : Type();
+#endif
+}
+
+template <class Type, class Compare> void Comm::DistributeAndMerge(const Vector<Type>& loc, const Type& splitter, Vector<Type>& SortedElem, Compare comp) const {
+#ifdef SCTL_HAVE_MPI
+  const Integer npes = Size();
+  const Long nloc = loc.Dim();
+
+  // Gather splitters
+  ScratchBuf<Type> splitter_all(npes);
+  StaticArray<Type,1> sp; sp[0] = splitter;
+  Allgather((ConstIterator<Type>)sp, 1, splitter_all.begin(), 1);
+
+  ScratchBuf<Long> scnt(npes), sdsp(npes + 1);
+  ScratchBuf<Long> rcnt(npes + 1), rdsp(npes + 1);
+  { // Set scnt, sdsp
+    sdsp[0] = 0;
+    sdsp[npes] = nloc;
+    #pragma omp parallel for schedule(static) if(npes > 128)
+    for (Integer d = 1; d < npes; d++) sdsp[d] = std::lower_bound(loc.begin(), loc.end(), splitter_all[d], comp) - loc.begin();
+    #pragma omp parallel for schedule(static) if(npes > 128)
+    for (Integer d = 0; d < npes; d++) scnt[d] = sdsp[d + 1] - sdsp[d];
+  }
+  { // Get rcnt, rdsp
+    rdsp[0] = 0;
+    rcnt[npes] = 0;
+    Alltoall(scnt.begin(), 1, rcnt.begin(), 1);
+    omp_par::scan(rcnt.begin(), rdsp.begin(), npes + 1);
+  }
+
+  ScratchBuf<Type> recv(rdsp[npes]);
+  Alltoallv(loc.begin(), scnt.begin(), sdsp.begin(), recv.begin(), rcnt.begin(), rdsp.begin());
+
+  // parallel multiway merge of the npes received sorted runs (segments recv[rdsp[d]..rdsp[d+1]))
+  if (SortedElem.Dim() != rdsp[npes]) SortedElem.ReInit(rdsp[npes]);
+  omp_par::multiway_merge(recv.begin(), rdsp.begin(), npes, SortedElem.begin(), comp);
+#else
+  SortedElem = loc; SCTL_UNUSED(splitter); SCTL_UNUSED(comp);
+#endif
+}
+
+template <class Type, class Compare> void Comm::SampleSort(const Vector<Type>& arr_, Vector<Type>& SortedElem, Compare comp, bool partition) const {  // single-pass distributed sample sort
+  static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  const Integer npes = Size();
+  if (npes == 1) {  // local sort only
+    if (SortedElem.Dim() != arr_.Dim()) SortedElem.ReInit(arr_.Dim());
+    comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
+    return;
+  }
+
+  Long totSize;
+  const Long nloc = arr_.Dim();
+  Allreduce(Ptr2ConstItr<Long>(&nloc, 1), Ptr2Itr<Long>(&totSize, 1), 1, CommOp::SUM);
+  if (!totSize) { SortedElem.ReInit(0); return; }
+
+  // local sort
+  ScratchBuf<Type> loc_buf(nloc); Vector<Type> loc(nloc, loc_buf.begin(), false);
+  comm_detail::LocalSort<Type>(arr_.begin(), loc.begin(), nloc, comp);
+
+  const Type my_split = DetermineSplitter(loc, totSize, comp);
+
+  DistributeAndMerge(loc, my_split, SortedElem, comp);
+  if (partition) PartitionW<Type>(SortedElem);
+#else
+  SCTL_UNUSED(partition);
+  if (SortedElem.Dim() != arr_.Dim()) SortedElem.ReInit(arr_.Dim());
+  comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
+#endif
+}
+
+template <class Type, class Compare> void Comm::SampleSort(const Vector<Type>& arr_, Vector<Type>& SortedElem, const Type& splitter, Compare comp) const {  // sort with per-rank splitter
+  static_assert(std::is_trivially_copyable<Type>::value, "Data is not trivially copyable!");
+#ifdef SCTL_HAVE_MPI
+  const Integer npes = Size();
+  if (npes == 1) {
+    if (SortedElem.Dim() != arr_.Dim()) SortedElem.ReInit(arr_.Dim());
+    comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
+    return;
+  }
+  ScratchBuf<Type> loc_buf(arr_.Dim()); Vector<Type> loc(arr_.Dim(), loc_buf.begin(), false);
+  comm_detail::LocalSort<Type>(arr_.begin(), loc.begin(), arr_.Dim(), comp);
+  DistributeAndMerge(loc, splitter, SortedElem, comp);
+#else
+  SCTL_UNUSED(splitter);
+  if (SortedElem.Dim() != arr_.Dim()) SortedElem.ReInit(arr_.Dim());
+  comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
 #endif
 }
 
