@@ -45,7 +45,7 @@ namespace sctl {
      *
      * @param[in] gmres_max_iter maximum number of GMRES iterations.
      */
-    void Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter, KrylovPrecond<Real>* guess);
+    void Solve(Vector<Real>& V, const Vector<Real>& F, const Vector<Real>& Vs, const Real gmres_tol, const Long gmres_max_iter, KrylovPrecond<Real>* guess = nullptr);
 
     private:
 

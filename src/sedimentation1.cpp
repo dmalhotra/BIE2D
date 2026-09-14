@@ -425,7 +425,7 @@ int main(int argc, char** argv) {
       SDC<Real> time_step(ts_order, comm);
       for (Real t = 0; t < T_end; t += dt) {
         const Real dt_ = std::min<Real>(dt, T_end-t);
-        time_step(&X_, dt_, X, mobility_solve, time_step.Order()*2, ts_tol*dt_/T_end);
+        time_step(&X_, dt_, X, mobility_solve, ts_tol*dt_/T_end);
         if (X_.Dim()) {
           X = X_;
           monitor_callback(t+dt_, dt_, X);
