@@ -33,9 +33,9 @@ int main(int argc, char** argv) {
     // Build linear operator
     auto LinOp = [&A](Vector<double>* Ax, const Vector<double>& x) {
       const Long N = x.Dim();
-      Ax->ReInit(N);
+      if (Ax->Dim() != N) Ax->ReInit(N);
       Matrix<double> Ax_(N, 1, Ax->begin(), false);
-      Ax_ = A * Matrix<double>(N, 1, (Iterator<double>)x.begin(), false);
+      Ax_ = A * Matrix<const double>(N, 1, x.begin(), false);
     };
 
     // Set exact solution x0 and the RHS b := A * x

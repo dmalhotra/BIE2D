@@ -1,16 +1,16 @@
 #ifndef _SCTL_BOUNDARY_INTEGRAL_TXX_
 #define _SCTL_BOUNDARY_INTEGRAL_TXX_
 
-#include <omp.h>                       // for omp_get_num_threads, omp_get_t...
 #include <algorithm>                   // for lower_bound, max, min, upper_b...
 #include <map>                         // for map
+#include <new>                         // for hardware_destructive_interference_size
 #include <set>                         // for set, __tree_const_iterator
 #include <string>                      // for basic_string, string, to_string
 #include <type_traits>                 // for is_copy_constructible
 #include <typeinfo>                    // for type_info
 #include <utility>                     // for pair, make_pair
 
-#include "sctl/common.hpp"             // for Long, Integer, SCTL_ASSERT
+#include "sctl/common.hpp"             // for Long, Integer, SCTL_ASSERT, SCTL_GET_(...)
 #include "sctl/boundary_integral.hpp"  // for BoundaryIntegralOp, BuildNearList
 #include "sctl/comm.hpp"               // for Comm, CommOp
 #include "sctl/comm.txx"               // for Comm::Allreduce, Comm::Size
@@ -19,9 +19,11 @@
 #include "sctl/math_utils.hpp"         // for log, sqrt
 #include "sctl/matrix.hpp"             // for Matrix
 #include "sctl/morton.hpp"             // for Morton
-#include "sctl/ompUtils.txx"           // for scan, merge_sort
+#include "sctl/ompUtils.txx"           // for scan, sample_sort
 #include "sctl/profile.hpp"            // for Profile
 #include "sctl/profile.txx"            // for Profile::Tic, Profile::Toc
+#include "sctl/scratch_pool.hpp"       // for ScratchBuf
+#include "sctl/scratch_pool.txx"       // for ScratchBuf
 #include "sctl/static-array.hpp"       // for StaticArray
 #include "sctl/static-array.txx"       // for StaticArray::operator[], Stati...
 #include "sctl/tree.hpp"               // for Morton
@@ -30,7 +32,7 @@
 
 namespace sctl {
 
-  template <class VType> static void concat_vecs(Vector<VType>& v, const Vector<Vector<VType>>& vec_lst) {
+  template <class VType> void concat_vecs(Vector<VType>& v, const Vector<Vector<VType>>& vec_lst) {
     const Long N = vec_lst.Dim();
     Vector<Long> dsp(N+1); dsp[0] = 0;
     for (Long i = 0; i < N; i++) {
@@ -74,7 +76,7 @@ namespace sctl {
     bool have_trg_normal;
     { // Set have_trg_normal
       StaticArray<Long,1> Nloc{Xn_trg.Dim()}, Nglb{0};
-      comm.Allreduce<Long>(Nloc, Nglb, 1, CommOp::SUM);
+      comm.Allreduce(Nloc + 0, Nglb + 0, 1, CommOp::SUM);
       have_trg_normal = (Nglb[0] > 0);
       SCTL_ASSERT(!have_trg_normal || (Xn_trg.Dim() == Xtrg.Dim()));
     }
@@ -122,7 +124,7 @@ namespace sctl {
             X0_local[k] = std::min<Real>(X0_local[k], Xsrc[i*COORD_DIM+k]);
           }
         }
-        comm_.Allreduce<Real>(X0_local, BBX0, COORD_DIM, CommOp::MIN);
+        comm_.Allreduce(X0_local, BBX0, COORD_DIM, CommOp::MIN);
 
         Real BBlen, len_local = 0;
         for (Long i = 0; i < Ntrg; i++) {
@@ -135,8 +137,8 @@ namespace sctl {
             len_local = std::max<Real>(len_local, Xsrc[i*COORD_DIM+k]-BBX0[k]);
           }
         }
-        comm_.Allreduce<Real>(Ptr2ConstItr<Real>(&len_local,1), Ptr2Itr<Real>(&BBlen,1), 1, CommOp::MAX);
-        BBlen_inv = 1/BBlen;
+        comm_.Allreduce(Ptr2ConstItr<Real>(&len_local,1), Ptr2Itr<Real>(&BBlen,1), 1, CommOp::MAX);
+        BBlen_inv = (BBlen > 0 ? 1/BBlen : (Real)1);
       }
       { // Expand bounding-box so that no points are on the boundary
         for (Long i = 0; i < COORD_DIM; i++) {
@@ -145,6 +147,7 @@ namespace sctl {
         BBlen_inv /= 1.1;
       }
 
+      #pragma omp parallel for schedule(static)
       for (Long i = 0; i < Ntrg; i++) { // Set trg_nodes
         StaticArray<Real,COORD_DIM> Xmid;
         trg_nodes[i].idx = trg_offset + i;
@@ -158,6 +161,7 @@ namespace sctl {
         trg_nodes[i].elem_idx = 0;
         trg_nodes[i].pid = rank;
       }
+      #pragma omp parallel for schedule(static)
       for (Long i = 0; i < Nsrc; i++) { // Set src_nodes
         Integer depth = (Integer)(log(src_radius[i]*BBlen_inv+machine_eps<Real>())/log(0.5));
         depth = std::min(Morton<COORD_DIM>::MaxDepth(), std::max<Integer>(depth,0));
@@ -171,6 +175,7 @@ namespace sctl {
         src_nodes[i].mid = Morton<COORD_DIM>((ConstIterator<Real>)Xmid, depth);
         src_nodes[i].pid = rank;
       }
+      #pragma omp parallel for schedule(static)
       for (Long i = 0; i < Nelem; i++) { // Set src_nodes.elem_idx
         for (Long j = 0; j < src_elem_nds_cnt[i]; j++) {
           src_nodes[src_elem_nds_dsp[i]+j].elem_idx = elem_offset + i;
@@ -180,12 +185,12 @@ namespace sctl {
 
     Vector<NodeData> trg_nodes0, src_nodes0, splitter_nodes(comm_.Size());
     { // Set trg_nodes0 <- sort(trg_nodes), src_nodes0 <- sort(src_nodes)
-      comm_.HyperQuickSort(src_nodes, src_nodes0, comp_node_mid);
-      comm_.HyperQuickSort(trg_nodes, trg_nodes0, comp_node_mid);
+      comm_.SampleSort(src_nodes, src_nodes0, comp_node_mid);
+      comm_.SampleSort(trg_nodes, trg_nodes0, comp_node_mid);
 
-      SCTL_ASSERT(src_nodes0.Dim());
-      StaticArray<NodeData,1> splitter_node{src_nodes0[0]};
-      if (!rank) splitter_node[0].mid = Morton<COORD_DIM>();
+      StaticArray<NodeData,1> splitter_node;
+      SCTL_ASSERT(!rank || src_nodes0.Dim());
+      splitter_node[0].mid = (rank ? src_nodes0[0].mid : Morton<COORD_DIM>());
       while (splitter_node[0].mid.Depth()) { // find coarsest ancestor with same coordinates
         auto& mid = splitter_node[0].mid;
         const Long depth = mid.Depth();
@@ -202,56 +207,80 @@ namespace sctl {
     Vector<NodeData> src_nodes1;
     if (1) { // Set src_nodes1 <- src_nodes0 + halo
       Vector<std::pair<Long,Long>> proc_srcidx_lst;
-      std::set<Long> user_proc_set; // tmp
-      Vector<Morton<COORD_DIM>> nbr_lst; // tmp
-      for (Long i = 0; i < src_nodes0.Dim(); i++) {
-        user_proc_set.clear();
-        src_nodes0[i].mid.NbrList(nbr_lst, src_nodes0[i].mid.Depth(), false);
-        for (const auto nbr : nbr_lst) if (nbr.Depth() >= 0) {
-          const auto proc_split_srch = [&splitter_nodes,&comp_node_mid](const Morton<COORD_DIM>& m) {
-            NodeData srch_node; srch_node.mid = m;
-            return  std::upper_bound(splitter_nodes.begin(), splitter_nodes.end(), srch_node, comp_node_mid) - splitter_nodes.begin() - 1;
-          };
-          Long p0 = proc_split_srch(nbr);
-          Long p1 = proc_split_srch(nbr.Next());
-          if (p1 < comm_.Size() && splitter_nodes[p1].mid < nbr.Next()) p1++;
-          for (Long k = p0; k < p1; k++) {
-            if (k != rank) user_proc_set.insert(k);
+      { // per-node: list ranks overlapping its neighbor cells (order irrelevant; sorted below)
+        const Integer omp_p = SCTL_GET_MAX_THREADS();
+        Vector<Vector<std::pair<Long,Long>>> proc_srcidx_omp(omp_p);
+        #pragma omp parallel num_threads(omp_p)
+        {
+          Vector<std::pair<Long,Long>>& local = proc_srcidx_omp[SCTL_GET_THREAD_NUM()];
+          std::set<Long> user_proc_set; // thread-private
+          Vector<Morton<COORD_DIM>> nbr_lst; // thread-private
+          #pragma omp for schedule(static)
+          for (Long i = 0; i < src_nodes0.Dim(); i++) {
+            user_proc_set.clear();
+            src_nodes0[i].mid.NbrList(nbr_lst, src_nodes0[i].mid.Depth(), Periodicity::NONE);
+            for (const auto nbr : nbr_lst) if (nbr.Depth() != Morton<COORD_DIM>::INVALID_DEPTH) {
+              const auto proc_split_srch = [&splitter_nodes,&comp_node_mid](const Morton<COORD_DIM>& m) {
+                NodeData srch_node; srch_node.mid = m;
+                return  std::upper_bound(splitter_nodes.begin(), splitter_nodes.end(), srch_node, comp_node_mid) - splitter_nodes.begin() - 1;
+              };
+              Long p0 = proc_split_srch(nbr);
+              Long p1 = proc_split_srch(nbr.Next());
+              if (p1 < comm_.Size() && splitter_nodes[p1].mid < nbr.Next()) p1++;
+              for (Long k = p0; k < p1; k++) {
+                if (k != rank) user_proc_set.insert(k);
+              }
+            }
+            for (const auto& p : user_proc_set) {
+              local.PushBack(std::make_pair(p, i));
+            }
           }
         }
-        for (const auto& p : user_proc_set) {
-          proc_srcidx_lst.PushBack(std::make_pair(p, i));
+        if (omp_p == 1) {
+          proc_srcidx_lst.Swap(proc_srcidx_omp[0]);
+        } else { // concatenate per-thread lists
+          Vector<Long> cnt(omp_p), dsp(omp_p+1); dsp[0] = 0;
+          for (Integer t = 0; t < omp_p; t++) {
+            cnt[t] = proc_srcidx_omp[t].Dim();
+            dsp[t+1] = dsp[t] + cnt[t];
+          }
+          proc_srcidx_lst.ReInit(dsp[omp_p]);
+          // Indexed by thread id: slots no thread filled are empty, so they add nothing to dsp.
+          #pragma omp parallel num_threads(omp_p)
+          {
+            const Integer tid = SCTL_GET_THREAD_NUM();
+            const Vector<std::pair<Long,Long>>& v = proc_srcidx_omp[tid];
+            const Long off = dsp[tid];
+            for (Long i = 0; i < v.Dim(); i++) proc_srcidx_lst[off+i] = v[i];
+          }
         }
       }
-      omp_par::merge_sort(proc_srcidx_lst.begin(), proc_srcidx_lst.end());
+      omp_par::sample_sort(proc_srcidx_lst.begin(), proc_srcidx_lst.end());
 
-      Vector<Long> scnt(np), sdsp(np); scnt = 0; sdsp = 0;
-      Vector<Long> rcnt(np), rdsp(np); rcnt = 0; rdsp = 0;
+      Vector<Long> scnt(np), sdsp(np+1);
+      #pragma omp parallel for schedule(static)
+      for (Long p = 0; p <= np; p++) sdsp[p] = std::lower_bound(proc_srcidx_lst.begin(), proc_srcidx_lst.end(), std::pair<Long,Long>(p,0)) - proc_srcidx_lst.begin();
+      #pragma omp parallel for schedule(static)
+      for (Long p = 0; p < np; p++) scnt[p] = sdsp[p+1] - sdsp[p];
+
       Vector<NodeData> sbuff(proc_srcidx_lst.Dim());
-      for (Long i = 0; i < sbuff.Dim(); i++) {
-        sbuff[i] = src_nodes0[proc_srcidx_lst[i].second];
-        scnt[proc_srcidx_lst[i].first]++;
-      }
-      omp_par::scan(scnt.begin(), sdsp.begin(), np);
-      comm_.Alltoall<Long>(scnt.begin(), 1, rcnt.begin(), 1);
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < sbuff.Dim(); i++) sbuff[i] = src_nodes0[proc_srcidx_lst[i].second];
+
+      Vector<Long> rcnt(np), rdsp(np); rdsp = 0;
+      comm_.Alltoall(scnt.begin(), 1, rcnt.begin(), 1);
       omp_par::scan(rcnt.begin(), rdsp.begin(), np);
 
       // Exchange data
       Vector<NodeData> rbuff(rdsp[np-1] + rcnt[np-1]);
-      void* req_ptr = comm_.Ialltoallv_sparse(sbuff.begin(), scnt.begin(), sdsp.begin(), rbuff.begin(), rcnt.begin(), rdsp.begin());
+      auto req_ptr = comm_.Ialltoallv_sparse(sbuff.begin(), scnt.begin(), sdsp.begin(), rbuff.begin(), rcnt.begin(), rdsp.begin());
 
       // Set src_nodes1
       src_nodes1.ReInit(rbuff.Dim() + src_nodes0.Dim());
-      for (Long i = 0; i < src_nodes0.Dim(); i++) {
-        src_nodes1[rdsp[rank]+i] = src_nodes0[i];
-      }
-      comm_.Wait(req_ptr);
-      for (Long i = 0; i < rdsp[rank]; i++) {
-        src_nodes1[i] = rbuff[i];
-      }
-      for (Long i = rdsp[rank]; i < rbuff.Dim(); i++) {
-        src_nodes1[src_nodes0.Dim()+i] = rbuff[i];
-      }
+      omp_par::memcpy(src_nodes1.begin()+rdsp[rank], src_nodes0.begin(), src_nodes0.Dim());
+      comm_.Wait(std::move(req_ptr));
+      omp_par::memcpy(src_nodes1.begin(), rbuff.begin(), rdsp[rank]);
+      omp_par::memcpy(src_nodes1.begin()+src_nodes0.Dim()+rdsp[rank], rbuff.begin()+rdsp[rank], rbuff.Dim()-rdsp[rank]);
     } else { // src_nodes1 <- Allgather(src_nodes0)
       const Long Np = comm_.Size();
       Vector<Long> cnt0(1), cnt(Np), dsp(Np);
@@ -269,105 +298,131 @@ namespace sctl {
       auto comp_elem_idx_mid = [](const NodeData& A, const NodeData& B) {
         return (A.elem_idx<B.elem_idx) || (A.elem_idx==B.elem_idx && A.mid<B.mid);
       };
-      omp_par::merge_sort(src_nodes1.begin(), src_nodes1.end(), comp_elem_idx_mid);
+      omp_par::sample_sort(src_nodes1.begin(), src_nodes1.end(), comp_elem_idx_mid);
 
-      // Preallocate memory // TODO: parallelize
-      Vector<Morton<COORD_DIM>> src_mid_lst, trg_mid_lst, nbr_lst;
-      Vector<std::pair<Long,Long>> trg_src_near_mid;
-      std::set<Morton<COORD_DIM>> trg_mid_set;
-      Vector<Long> src_range, trg_range;
+      const Long eid0 = src_nodes1[0].elem_idx;
+      const Long eid1 = src_nodes1[src_nodes1.Dim()-1].elem_idx + 1;
 
-      Long eid0 = src_nodes1[0].elem_idx;
-      Long eid1 = src_nodes1[src_nodes1.Dim()-1].elem_idx + 1;
-      for (Long eid = eid0; eid < eid1; eid++) { // loop over all elements
-        Long src_idx0, src_idx1;
-        { // Set (src_idx0, src_idx1) the index range of nodes with elem_idx eid
-          NodeData srch_node;
-          srch_node.elem_idx = eid;
-          src_idx0 = std::lower_bound(src_nodes1.begin(), src_nodes1.end(), srch_node, [](const NodeData& A, const NodeData& B){return A.elem_idx<B.elem_idx;}) - src_nodes1.begin();
-          src_idx1 = std::upper_bound(src_nodes1.begin(), src_nodes1.end(), srch_node, [](const NodeData& A, const NodeData& B){return A.elem_idx<B.elem_idx;}) - src_nodes1.begin();
-        }
-        { // build near-list for element eid
-          trg_src_near_mid.ReInit(0); // list of neighbor pairs from (trg_mid_lst x src_mid_lst), sorted by trg-mid first and then src-mid
-          src_mid_lst.ReInit(0); // unique covering nodes of element-eid
-          trg_mid_lst.ReInit(0); // unique neighbor nodes of src_mid_lst
-          src_range.ReInit(0); // range of src-spheres (src_nodes1) contained in each src_mid_lst
-          trg_range.ReInit(0); // range of trg-points (trg_nodes0) contained in each trg_mid_lst
-          trg_mid_set.clear(); // tmp
-          { // build src_mid_lst, src_range
-            Long src_idx = src_idx0;
-            while (src_idx < src_idx1) {
-              NodeData nxt_node;
-              nxt_node.mid = src_nodes1[src_idx].mid.Next();
-              Long src_idx_new = std::lower_bound(src_nodes1.begin()+src_idx, src_nodes1.begin()+src_idx1, nxt_node, comp_node_mid) - src_nodes1.begin();
-              src_mid_lst.PushBack(src_nodes1[src_idx].mid);
-              src_range.PushBack(src_idx    );
-              src_range.PushBack(src_idx_new);
-              src_idx = src_idx_new;
-            }
+      // Build per-thread near-lists and concatenate.
+      const Integer omp_p = SCTL_GET_MAX_THREADS();
+      Vector<Vector<NodeData>> near_lst_omp(omp_p);
+      #pragma omp parallel num_threads(omp_p)
+      {
+        const Integer tid = SCTL_GET_THREAD_NUM();
+        Vector<NodeData>& near_lst_local = near_lst_omp[tid];
+        Vector<Morton<COORD_DIM>> src_mid_lst, trg_mid_lst, nbr_lst; // thread-private scratch
+        Vector<std::pair<Long,Long>> trg_src_near_mid;
+        std::set<Morton<COORD_DIM>> trg_mid_set;
+        Vector<Long> src_range, trg_range;
+        #pragma omp for schedule(dynamic)
+        for (Long eid = eid0; eid < eid1; eid++) { // loop over all elements
+          Long src_idx0, src_idx1;
+          { // Set (src_idx0, src_idx1) the index range of nodes with elem_idx eid
+            NodeData srch_node;
+            srch_node.elem_idx = eid;
+            src_idx0 = std::lower_bound(src_nodes1.begin(), src_nodes1.end(), srch_node, [](const NodeData& A, const NodeData& B){return A.elem_idx<B.elem_idx;}) - src_nodes1.begin();
+            src_idx1 = std::upper_bound(src_nodes1.begin(), src_nodes1.end(), srch_node, [](const NodeData& A, const NodeData& B){return A.elem_idx<B.elem_idx;}) - src_nodes1.begin();
           }
-          { // build trg_mid_lst, trg_range
-            Morton<COORD_DIM> nxt_node;
-            for (const auto& src_mid : src_mid_lst) {
-              src_mid.NbrList(nbr_lst, src_mid.Depth(), false);
-              for (const auto& mid : nbr_lst) if (mid.Depth() >= 0) {
-                trg_mid_set.insert(mid);
+          { // build near-list for element eid
+            trg_src_near_mid.ReInit(0); // list of neighbor pairs from (trg_mid_lst x src_mid_lst), sorted by trg-mid first and then src-mid
+            src_mid_lst.ReInit(0); // unique covering nodes of element-eid
+            trg_mid_lst.ReInit(0); // unique neighbor nodes of src_mid_lst
+            src_range.ReInit(0); // range of src-spheres (src_nodes1) contained in each src_mid_lst
+            trg_range.ReInit(0); // range of trg-points (trg_nodes0) contained in each trg_mid_lst
+            trg_mid_set.clear(); // tmp
+            { // build src_mid_lst, src_range
+              Long src_idx = src_idx0;
+              while (src_idx < src_idx1) {
+                NodeData nxt_node;
+                nxt_node.mid = src_nodes1[src_idx].mid.Next();
+                Long src_idx_new = std::lower_bound(src_nodes1.begin()+src_idx, src_nodes1.begin()+src_idx1, nxt_node, comp_node_mid) - src_nodes1.begin();
+                src_mid_lst.PushBack(src_nodes1[src_idx].mid);
+                src_range.PushBack(src_idx    );
+                src_range.PushBack(src_idx_new);
+                src_idx = src_idx_new;
               }
             }
-            for (const auto& trg_mid : trg_mid_set) {
-              if (trg_mid >= nxt_node) {
-                nxt_node = trg_mid.Next();
-                NodeData node0, node1;
-                node0.mid = trg_mid;
-                node1.mid = nxt_node;
-                Long trg_range0 = std::lower_bound(trg_nodes0.begin(), trg_nodes0.end(), node0, comp_node_mid) - trg_nodes0.begin();
-                Long trg_range1 = std::lower_bound(trg_nodes0.begin(), trg_nodes0.end(), node1, comp_node_mid) - trg_nodes0.begin();
-                if (trg_range1 > trg_range0) {
-                  trg_range.PushBack(trg_range0);
-                  trg_range.PushBack(trg_range1);
-                  trg_mid_lst.PushBack(trg_mid);
+            { // build trg_mid_lst, trg_range
+              Morton<COORD_DIM> nxt_node{}; // init to root node
+              for (const auto& src_mid : src_mid_lst) {
+                src_mid.NbrList(nbr_lst, src_mid.Depth(), Periodicity::NONE);
+                for (const auto& mid : nbr_lst) if (mid.Depth() != Morton<COORD_DIM>::INVALID_DEPTH) {
+                  trg_mid_set.insert(mid);
                 }
               }
-            }
-          }
-          { // build interaction list trg_src_near_mid
-            for (Long i = 0; i < src_mid_lst.Dim(); i++) {
-              src_mid_lst[i].NbrList(nbr_lst, src_mid_lst[i].Depth(), false);
-              for (const auto& mid : nbr_lst) if (mid.Depth() >= 0) {
-                Long j = std::upper_bound(trg_mid_lst.begin(), trg_mid_lst.end(), mid) - trg_mid_lst.begin() - 1;
-                if (j>=0 && mid.Ancestor(trg_mid_lst[j].Depth()) == trg_mid_lst[j]) {
-                  trg_src_near_mid.PushBack(std::pair<Long,Long>(j,i));
-                }
-              }
-            }
-            std::sort(trg_src_near_mid.begin(), trg_src_near_mid.end());
-          }
-          { // build near_lst
-            for (Long i = 0; i < trg_mid_lst.Dim(); i++) { // loop over trg_mid
-              Long j0 = std::lower_bound(trg_src_near_mid.begin(), trg_src_near_mid.end(), std::pair<Long,Long>(i+0,0)) - trg_src_near_mid.begin();
-              Long j1 = std::lower_bound(trg_src_near_mid.begin(), trg_src_near_mid.end(), std::pair<Long,Long>(i+1,0)) - trg_src_near_mid.begin();
-              for (Long ii = trg_range[2*i+0]; ii < trg_range[2*i+1]; ii++) { // loop over trg_nodes0
-                const NodeData& trg_node = trg_nodes0[ii];
-                bool is_near = false;
-                for (Long j = j0; j < j1; j++) { // loop over near src_mid
-                  Long jj = trg_src_near_mid[j].second;
-                  if (j==j0 || trg_src_near_mid[j-1].second!=jj) {
-                    for (Long jjj = src_range[jj*2+0]; jjj < src_range[jj*2+1]; jjj++) { // loop over src_nodes1
-                      const NodeData& src_node = src_nodes1[jjj];
-                      is_near = (node_dist2(src_node,trg_node) < src_node.rad*src_node.rad);
-                      if (is_near) break;
-                    }
+              for (const auto& trg_mid : trg_mid_set) {
+                if (trg_mid >= nxt_node) {
+                  nxt_node = trg_mid.Next();
+                  NodeData node0, node1;
+                  node0.mid = trg_mid;
+                  node1.mid = nxt_node;
+                  Long trg_range0 = std::lower_bound(trg_nodes0.begin(), trg_nodes0.end(), node0, comp_node_mid) - trg_nodes0.begin();
+                  Long trg_range1 = std::lower_bound(trg_nodes0.begin(), trg_nodes0.end(), node1, comp_node_mid) - trg_nodes0.begin();
+                  if (trg_range1 > trg_range0) {
+                    trg_range.PushBack(trg_range0);
+                    trg_range.PushBack(trg_range1);
+                    trg_mid_lst.PushBack(trg_mid);
                   }
-                  if (is_near) break;
                 }
-                if (is_near) {
-                  NodeData node = trg_node;
-                  node.elem_idx = eid;
-                  near_lst.PushBack(node);
+              }
+            }
+            { // build interaction list trg_src_near_mid
+              for (Long i = 0; i < src_mid_lst.Dim(); i++) {
+                src_mid_lst[i].NbrList(nbr_lst, src_mid_lst[i].Depth(), Periodicity::NONE);
+                for (const auto& mid : nbr_lst) if (mid.Depth() != Morton<COORD_DIM>::INVALID_DEPTH) {
+                  Long j = std::upper_bound(trg_mid_lst.begin(), trg_mid_lst.end(), mid) - trg_mid_lst.begin() - 1;
+                  if (j>=0 && mid.Ancestor(trg_mid_lst[j].Depth()) == trg_mid_lst[j]) { // trg_mid_lst[j] is an ancestor of mid
+                    trg_src_near_mid.PushBack(std::pair<Long,Long>(j,i));
+                  }
+                }
+              }
+              std::sort(trg_src_near_mid.begin(), trg_src_near_mid.end());
+            }
+            { // build near_lst
+              for (Long i = 0; i < trg_mid_lst.Dim(); i++) { // loop over trg_mid
+                const Long j0 = std::lower_bound(trg_src_near_mid.begin(), trg_src_near_mid.end(), std::pair<Long,Long>(i+0,0)) - trg_src_near_mid.begin();
+                const Long j1 = std::lower_bound(trg_src_near_mid.begin(), trg_src_near_mid.end(), std::pair<Long,Long>(i+1,0)) - trg_src_near_mid.begin();
+                for (Long ii = trg_range[2*i+0]; ii < trg_range[2*i+1]; ii++) { // loop over trg_nodes0
+                  const NodeData& trg_node = trg_nodes0[ii];
+                  bool is_near = false;
+                  for (Long j = j0; j < j1; j++) { // loop over near src_mid
+                    const Long jj = trg_src_near_mid[j].second;
+                    if (j==j0 || trg_src_near_mid[j-1].second!=jj) {
+                      for (Long jjj = src_range[jj*2+0]; jjj < src_range[jj*2+1]; jjj++) { // loop over src_nodes1
+                        const NodeData& src_node = src_nodes1[jjj];
+                        is_near = (node_dist2(src_node,trg_node) < src_node.rad*src_node.rad);
+                        if (is_near) break;
+                      }
+                    }
+                    if (is_near) break;
+                  }
+                  if (is_near) {
+                    NodeData node = trg_node;
+                    node.elem_idx = eid;
+                    near_lst_local.PushBack(node);
+                  }
                 }
               }
             }
           }
+        }
+      }
+      if (omp_p == 1) {
+        near_lst.Swap(near_lst_omp[0]);
+      } else { // concatenate per-thread near-lists (re-sorted below)
+        Vector<Long> cnt(omp_p), dsp(omp_p+1); dsp[0] = 0;
+        for (Integer i = 0; i < omp_p; i++) {
+          cnt[i] = near_lst_omp[i].Dim();
+          dsp[i+1] = dsp[i] + cnt[i];
+        }
+        near_lst.ReInit(dsp[omp_p]);
+        // Indexed by thread id: slots no thread filled are empty, so they add nothing to dsp.
+        #pragma omp parallel num_threads(omp_p)
+        {
+          const Integer tid = SCTL_GET_THREAD_NUM();
+          const Vector<NodeData>& v = near_lst_omp[tid];
+          const Long off = dsp[tid];
+          for (Long i = 0; i < v.Dim(); i++) near_lst[off+i] = v[i];
         }
       }
     }
@@ -377,8 +432,7 @@ namespace sctl {
         NodeData split_node;
         split_node.idx=0;
         split_node.elem_idx=elem_offset;
-        comm_.HyperQuickSort(near_lst, near_lst0, comp_node_eid_idx);
-        comm_.PartitionS(near_lst0, split_node, comp_node_eid_idx);
+        comm_.SampleSort(near_lst, near_lst0, split_node, comp_node_eid_idx);
       }
       near_lst.Swap(near_lst0);
     }
@@ -406,8 +460,8 @@ namespace sctl {
       near_elem_dsp.ReInit(Nelem);
       #pragma omp parallel
       { // Set near_elem_cnt, near_elem_dsp
-        const Integer tid = omp_get_thread_num();
-        const Integer omp_p = omp_get_num_threads();
+        const Integer tid = SCTL_GET_THREAD_NUM();
+        const Integer omp_p = SCTL_GET_NUM_THREADS();
         const Long elem_idx0 = Nelem*(tid+0)/omp_p;
         const Long elem_idx1 = Nelem*(tid+1)/omp_p;
         for (Long i = elem_idx0; i < elem_idx1; i++) {
@@ -446,8 +500,8 @@ namespace sctl {
       near_trg_dsp.ReInit(Ntrg);
       #pragma omp parallel
       { // Set near_trg_cnt, near_trg_dsp
-        const Integer tid = omp_get_thread_num();
-        const Integer omp_p = omp_get_num_threads();
+        const Integer tid = SCTL_GET_THREAD_NUM();
+        const Integer omp_p = SCTL_GET_NUM_THREADS();
         const Long trg_idx0 = Ntrg*(tid+0)/omp_p;
         const Long trg_idx1 = Ntrg*(tid+1)/omp_p;
         for (Long i = trg_idx0; i < trg_idx1; i++) {
@@ -480,7 +534,7 @@ namespace sctl {
 
 
   template <class Real> template <class Kernel> void ElementListBase<Real>::SelfInterac(Vector<Matrix<Real>>& M_lst, const Kernel& ker, Real tol, bool trg_dot_prod, const ElementListBase<Real>* self) {
-    if (M_lst.Dim() != 0) M_lst.ReInit(0);
+    for (auto& M : M_lst) if (M.Dim(0) != 0 || M.Dim(1) != 0) M.ReInit(0,0);
   }
 
   template <class Real> template <class Kernel> void ElementListBase<Real>::NearInterac(Matrix<Real>& M, const Vector<Real>& Xt, const Vector<Real>& normal_trg, const Kernel& ker, Real tol, const Long elem_idx, const ElementListBase<Real>* self) {
@@ -508,10 +562,10 @@ namespace sctl {
     fmm.SetAccuracy((Integer)(log(tol_)/log(0.1))+1);
   }
 
-  template <class Real, class Kernel> BoundaryIntegralOp<Real,Kernel>::~BoundaryIntegralOp() {
-    Vector<std::string> elem_lst_name;
-    for (auto& it : elem_lst_map) elem_lst_name.PushBack(it.first);
-    for (const auto& name : elem_lst_name) DeleteElemList(name);
+  template <class Real, class Kernel> BoundaryIntegralOp<Real,Kernel>::~BoundaryIntegralOp() = default;
+
+  template <class Real, class Kernel> const Comm& BoundaryIntegralOp<Real,Kernel>::GetComm() const {
+    return comm_;
   }
 
   template <class Real, class Kernel> void BoundaryIntegralOp<Real,Kernel>::SetPeriodicity(Periodicity p, Real L) {
@@ -559,7 +613,8 @@ namespace sctl {
     //SCTL_ASSERT_MSG(elem_lst_map.find(name) == elem_lst_map.end(), "Element list already exists.");
     if (elem_lst_map.find(name) != elem_lst_map.end()) DeleteElemList(name);
 
-    elem_lst_map[name] = dynamic_cast<ElementListBase<Real>*>(new ElemLstType(elem_lst));
+    std::unique_ptr<ElementListBase<Real>> owned(new ElemLstType(elem_lst));
+    elem_lst_map[name] = std::move(owned);
     elem_data_map[name].SelfInterac = ElemLstType::template SelfInterac<Kernel>;
     elem_data_map[name].NearInterac = ElemLstType::template NearInterac<Kernel>;
     elem_data_map[name].EvalNearInterac = ElemLstType::template EvalNearInterac<Kernel>;
@@ -568,14 +623,45 @@ namespace sctl {
 
   template <class Real, class Kernel> template <class ElemLstType> const ElemLstType& BoundaryIntegralOp<Real,Kernel>::GetElemList(const std::string& name) const {
     SCTL_ASSERT_MSG(elem_lst_map.find(name) != elem_lst_map.end(), "Element list does not exist.");
-    return *dynamic_cast<const ElemLstType*>(elem_lst_map.at(name));
+    return *dynamic_cast<const ElemLstType*>(elem_lst_map.at(name).get());
+  }
+
+  template <class Real, class Kernel> void BoundaryIntegralOp<Real,Kernel>::GetElemSubArray(Vector<Real>& Ve, Vector<Real>& V, const std::string& name, const Long elem_idx) const {
+    SetupBasic();
+    SCTL_ASSERT_MSG(elem_lst_map.find(name) != elem_lst_map.end(), "Element list does not exist.");
+
+    const Long elem_lst_idx = std::lower_bound(elem_lst_name.begin(), elem_lst_name.end(), name) - elem_lst_name.begin();
+    SCTL_ASSERT(elem_lst_idx < elem_lst_name.Dim() && elem_lst_name[elem_lst_idx] == name);
+
+    const Long elem0 = elem_lst_dsp[elem_lst_idx];
+    const Long elem_cnt = elem_lst_cnt[elem_lst_idx];
+    SCTL_ASSERT_MSG(elem_idx >= -1 && elem_idx < elem_cnt, "Invalid element index.");
+
+    const Long elem_beg = (elem_idx < 0 ? elem0 : elem0 + elem_idx);
+    const Long elem_end = (elem_idx < 0 ? elem0 + elem_cnt : elem0 + elem_idx + 1);
+    const Long nds_beg = (elem_cnt ? elem_nds_dsp[elem_beg] : 0);
+    const Long nds_end = (elem_cnt ? elem_nds_dsp[elem_end-1] + elem_nds_cnt[elem_end-1] : nds_beg);
+
+    const Long Nnds = (elem_nds_cnt.Dim() ? elem_nds_dsp.end()[-1] + elem_nds_cnt.end()[-1] : 0);
+    SCTL_ASSERT_MSG(!Nnds || V.Dim() % Nnds == 0, "Input vector size is not compatible with element nodes.");
+    const Long dof = (Nnds ? V.Dim() / Nnds : 0);
+    const Long subdim = (nds_end - nds_beg) * dof;
+
+    if (!subdim) {
+      Ve.ReInit(0);
+    } else {
+      Ve.ReInit(subdim, V.begin() + nds_beg*dof, false);
+    }
+  }
+
+  template <class Real, class Kernel> template <class ElemLstType> void BoundaryIntegralOp<Real,Kernel>::GetElemSubArray(Vector<Real>& Ve, Vector<Real>& V, const Long elem_idx) const {
+    GetElemSubArray(Ve, V, std::to_string(typeid(ElemLstType).hash_code()), elem_idx);
   }
 
   template <class Real, class Kernel> void BoundaryIntegralOp<Real,Kernel>::DeleteElemList(const std::string& name) {
     //SCTL_ASSERT_MSG(elem_lst_map.find(name) != elem_lst_map.end(), "Element list does not exist.");
     if (elem_lst_map.find(name) == elem_lst_map.end()) return;
 
-    delete (ElementListBase<Real>*)elem_lst_map[name];
     elem_data_map.erase(name);
     elem_lst_map.erase(name);
     ClearSetup();
@@ -815,19 +901,22 @@ namespace sctl {
       for (Long i = 0; i < Nlst; i++) {
         const auto& name = elem_lst_name[i];
         const auto& elem_lst = elem_lst_map.at(name);
-        elem_cnt[i] = (elem_lst->MatrixFree() ? 0 : elem_lst->Size());
+        elem_cnt[i] = elem_lst->Size();
         elem_dsp[i] = (i==0?0:elem_dsp[i-1]+elem_cnt[i-1]);
       }
 
-      if (K_self.Dim() != elem_dsp[Nlst-1]+elem_cnt[Nlst-1]) K_self.ReInit(elem_dsp[Nlst-1]+elem_cnt[Nlst-1]);
+      if (K_self.Dim() != (Nlst ? elem_dsp[Nlst-1]+elem_cnt[Nlst-1] : 0)) K_self.ReInit((Nlst ? elem_dsp[Nlst-1]+elem_cnt[Nlst-1] : 0));
       // TODO: also pre-allocate elements of K_self from a memory pool.
       for (Long i = 0; i < Nlst; i++) {
         const auto& name = elem_lst_name[i];
         const auto& elem_lst = elem_lst_map.at(name);
         const auto& elem_data = elem_data_map.at(name);
-        if (elem_lst->MatrixFree()) continue;
         Vector<Matrix<Real>> K_self_(elem_cnt[i], K_self.begin() + elem_dsp[i], false);
-        elem_data.SelfInterac(K_self_, ker_, tol_, trg_normal_dot_prod_, elem_lst);
+        if (elem_lst->MatrixFree()) {
+          for (auto& K : K_self_) K.ReInit(0,0);
+          continue;
+        }
+        elem_data.SelfInterac(K_self_, ker_, tol_, trg_normal_dot_prod_, elem_lst.get());
       }
     }
     Profile::Toc();
@@ -846,6 +935,9 @@ namespace sctl {
     K_near_cnt.ReInit(0);
     K_near_dsp.ReInit(0);
     K_near.ReInit(0);
+    near_blk_elem.ReInit(0);
+    near_blk_t0.ReInit(0);
+    near_blk_cnt.ReInit(0);
     SetupBasic();
     SetupFar();
     SetupSelf();
@@ -867,7 +959,7 @@ namespace sctl {
         Long count = 1;
         periodic_shift = 0;
         for (Long k = 0; k < COORD_DIM; k++) {
-          if (static_cast<uint8_t>(periodicity_)&(1<<k)) {
+          if (is_periodic(periodicity_, k)) {
             for (Long i = count; i < 3*count; i++) {
               for (Long kk = 0; kk < k; kk++) periodic_shift[i][kk] = periodic_shift[i%count][kk];
               periodic_shift[i][k] = (i/count==2 ? -1 : i/count);
@@ -914,6 +1006,31 @@ namespace sctl {
     }
     Profile::Toc();
 
+    { // Set near_blk_elem, near_blk_t0, near_blk_cnt
+      // grain is sized to cover the team; with many elements it exceeds the per-element target
+      // count, leaving one block per element. Depends only on the near-list, so build once.
+      const Long Nelem = near_elem_cnt.Dim();
+      const Long N_near = (Nelem ? near_elem_dsp[Nelem-1] + near_elem_cnt[Nelem-1] : 0);
+      const Long grain = std::max<Long>(1, N_near/(4*SCTL_GET_MAX_THREADS()));
+      ScratchBuf<Long> cnt_buf(Nelem), dsp_buf(Nelem);
+      Vector<Long> blk_cnt(Nelem, cnt_buf.begin(), false), blk_dsp(Nelem, dsp_buf.begin(), false);
+      #pragma omp parallel for schedule(static)
+      for (Long e = 0; e < Nelem; e++) blk_cnt[e] = (near_elem_cnt[e] + grain-1) / grain;
+      if (Nelem) blk_dsp[0] = 0; // omp_par::scan does not write B[0]
+      omp_par::scan(blk_cnt.begin(), blk_dsp.begin(), Nelem);
+      const Long Nblk = (Nelem ? blk_dsp[Nelem-1] + blk_cnt[Nelem-1] : 0);
+      near_blk_elem.ReInit(Nblk); near_blk_t0.ReInit(Nblk); near_blk_cnt.ReInit(Nblk);
+      #pragma omp parallel for schedule(static)
+      for (Long e = 0; e < Nelem; e++) {
+        Long b = blk_dsp[e];
+        for (Long t0 = 0; t0 < near_elem_cnt[e]; t0 += grain, b++) {
+          near_blk_elem[b] = e;
+          near_blk_t0[b] = t0;
+          near_blk_cnt[b] = std::min(grain, near_elem_cnt[e]-t0);
+        }
+      }
+    }
+
     { // Set K_near_cnt, K_near_dsp, K_near
       const Integer KDIM1_ = (trg_normal_dot_prod_ ? KDIM1/COORD_DIM : KDIM1);
       const Long Nlst = elem_lst_map.size();
@@ -935,12 +1052,25 @@ namespace sctl {
         }
         omp_par::scan(K_near_cnt.begin(), K_near_dsp.begin(), Nelem);
       }
+      Profile::Tic("KNearBuild", &comm_, false, 7);
       if (Nelem) { // Set K_near
         K_near.ReInit((K_near_dsp[Nelem-1]+K_near_cnt[Nelem-1])*KDIM0*KDIM1_);
 
-        constexpr Long cache_line_size = 512;
+        // A chunk must span at least one cache line to avoid false sharing at chunk boundaries.
+        #if defined(__cpp_lib_hardware_interference_size)
+        #if defined(__GNUC__) && !defined(__clang__) // -Winterference-size is GCC-only
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Winterference-size" // scheduling hint only; not ABI
+        #endif
+        constexpr Long cache_line_size = (Long)std::hardware_destructive_interference_size;
+        #if defined(__GNUC__) && !defined(__clang__)
+        #pragma GCC diagnostic pop
+        #endif
+        #else
+        constexpr Long cache_line_size = SCTL_MEM_ALIGN;
+        #endif
         const Long N_near = near_elem_dsp[Nelem-1] + near_elem_cnt[Nelem-1];
-        const Long omp_chunk_size = std::max(N_near/omp_get_max_threads()/32, (cache_line_size+KDIM1_-1)/KDIM1_);
+        const Long omp_chunk_size = std::max(N_near/SCTL_GET_MAX_THREADS()/32, (cache_line_size/(Long)sizeof(Real)+KDIM1_-1)/KDIM1_);
         #pragma omp parallel for schedule(dynamic,omp_chunk_size)
         for (Long i = 0; i < N_near; i++) { // loop over all pairs of elements and their near targets
           const Long elem_idx = std::lower_bound(near_elem_dsp.begin(), near_elem_dsp.end(), i+1) - near_elem_dsp.begin() - 1;
@@ -955,7 +1085,7 @@ namespace sctl {
 
             const Long N0 = elem_nds_cnt[elem_idx]*KDIM0;
             const Vector<Real> Xsurf_(elem_nds_cnt[elem_idx]*COORD_DIM, Xsurf.begin()+elem_nds_dsp[elem_idx]*COORD_DIM, false);
-            Matrix<Real> K_near_(N0,near_elem_cnt[elem_idx]*KDIM1_, K_near.begin()+K_near_dsp[elem_idx]*KDIM0*KDIM1_, false);
+            Matrix<Real> K_near_(near_elem_cnt[elem_idx]*KDIM1_, N0, K_near.begin()+K_near_dsp[elem_idx]*KDIM0*KDIM1_, false);
 
             {
               const Long k = i - near_elem_dsp[elem_idx]; // target index in near-list of elem_idx
@@ -991,31 +1121,31 @@ namespace sctl {
                   SCTL_ASSERT(K_near0.Dim(0) == N0);
                   for (Long l = 0; l < N0; l++) {
                     for (Long k1 = 0; k1 < KDIM1_; k1++) {
-                      K_near_[l][k*KDIM1_+k1] = K_near0[l][min_Xsurf*KDIM1_+k1];
+                      K_near_[k*KDIM1_+k1][l] = K_near0[l][min_Xsurf*KDIM1_+k1];
                     }
                   }
                 } else {
                   for (Long l = 0; l < N0; l++) {
                     for (Long k1 = 0; k1 < KDIM1_; k1++) {
-                      K_near_[l][k*KDIM1_+k1] = 0;
+                      K_near_[k*KDIM1_+k1][l] = 0;
                     }
                   }
                 }
               } else {
-                StaticArray<Real,10000> buff0;
-                Matrix<Real> K_near0(N0, KDIM1_, (N0*KDIM1_>10000?NullIterator<Real>():buff0), (N0*KDIM1_>10000));
-                elem_data.NearInterac(K_near0, Xt, Xn, ker_, tol_, j, elem_lst);
+                ScratchBuf<Real> K_near0_storage(N0 * KDIM1_);
+                Matrix<Real> K_near0(N0, KDIM1_, K_near0_storage.begin(), false);
+                elem_data.NearInterac(K_near0, Xt, Xn, ker_, tol_, j, elem_lst.get());
 
                 if (K_near0.Dim(0) != 0 && K_near0.Dim(1) != 0) {
                   for (Long l = 0; l < N0; l++) {
                     for (Long k1 = 0; k1 < KDIM1_; k1++) {
-                      K_near_[l][k*KDIM1_+k1] = K_near0[l][k1];
+                      K_near_[k*KDIM1_+k1][l] = K_near0[l][k1];
                     }
                   }
                 } else {
                   for (Long l = 0; l < N0; l++) {
                     for (Long k1 = 0; k1 < KDIM1_; k1++) {
-                      K_near_[l][k*KDIM1_+k1] = 0;
+                      K_near_[k*KDIM1_+k1][l] = 0;
                     }
                   }
                 }
@@ -1024,15 +1154,19 @@ namespace sctl {
           }
         }
       }
+      Profile::Toc();
 
+      Profile::Tic("KNearSubtract", &comm_, false, 7);
       for (Long i = 0; i < Nlst; i++) { // Subtract direct-interaction part from K_near
         const auto& elem_lst = elem_lst_map.at(elem_lst_name[i]);
         if (elem_lst->MatrixFree()) continue;
-        #pragma omp parallel for if(elem_lst_cnt[i] > omp_get_max_threads()) schedule(dynamic)
-        for (Long j = 0; j < elem_lst_cnt[i]; j++) { // subtract direct sum
-          const Long elem_idx = elem_lst_dsp[i]+j;
-          const Long trg_cnt = near_elem_cnt[elem_idx];
-          const Long trg_dsp = near_elem_dsp[elem_idx];
+        #pragma omp parallel for schedule(dynamic)
+        for (Long blk = 0; blk < near_blk_elem.Dim(); blk++) { // subtract direct sum
+          const Long elem_idx = near_blk_elem[blk], t0 = near_blk_t0[blk];
+          const Long j = elem_idx - elem_lst_dsp[i];
+          if (j < 0 || j >= elem_lst_cnt[i]) continue; // block belongs to another element list
+          const Long trg_cnt = near_blk_cnt[blk];
+          const Long trg_dsp = near_elem_dsp[elem_idx] + t0;
           const Vector<Real> Xtrg_near_(trg_cnt*COORD_DIM, Xtrg_near.begin()+trg_dsp*COORD_DIM, false);
           const Vector<Real> Xn_trg_near_((trg_normal_dot_prod_ ? trg_cnt*COORD_DIM : 0), Xn_trg_near.begin()+trg_dsp*COORD_DIM, false);
           if (!trg_cnt) continue;
@@ -1043,15 +1177,18 @@ namespace sctl {
           const Vector<Real> Xn(far_src_cnt*COORD_DIM, Xn_far.begin() + far_src_dsp*COORD_DIM, false);
           const Vector<Real> wts(far_src_cnt, wts_far.begin() + far_src_dsp, false);
 
-          SCTL_ASSERT(K_near_cnt[elem_idx] == elem_nds_cnt[elem_idx]*trg_cnt);
-          Matrix<Real> K_near_(elem_nds_cnt[elem_idx]*KDIM0, trg_cnt*KDIM1_, K_near.begin()+K_near_dsp[elem_idx]*KDIM0*KDIM1_, false);
+          const Long src_dof = elem_nds_cnt[elem_idx]*KDIM0;
+          SCTL_ASSERT(K_near_cnt[elem_idx] == elem_nds_cnt[elem_idx]*near_elem_cnt[elem_idx]);
+          // target-major, so this block's targets are a contiguous row-block
+          Matrix<Real> K_near_(trg_cnt*KDIM1_, src_dof, K_near.begin()+K_near_dsp[elem_idx]*KDIM0*KDIM1_ + t0*KDIM1_*src_dof, false);
           { // Set K_near_
-            Matrix<Real> Mker(far_src_cnt*KDIM0, trg_cnt*KDIM1_);
+            ScratchBuf<Real> Mker_storage(far_src_cnt*KDIM0 * trg_cnt*KDIM1_);
+            Matrix<Real> Mker(far_src_cnt*KDIM0, trg_cnt*KDIM1_, Mker_storage.begin(), false);
             if (trg_normal_dot_prod_) {
-              Matrix<Real> Mker_;
               constexpr Integer KDIM1_ = KDIM1/COORD_DIM;
-              ker_.template KernelMatrix<Real,true>(Mker_, Xtrg_near_, X, Xn);
-              #pragma omp parallel for schedule(static)
+              ScratchBuf<Real> Mker__storage(far_src_cnt*KDIM0 * trg_cnt*KDIM1);
+              Matrix<Real> Mker_(far_src_cnt*KDIM0, trg_cnt*KDIM1, Mker__storage.begin(), false);
+              ker_.template KernelMatrix<Real,false>(Mker_, Xtrg_near_, X, Xn);
               for (Long s = 0; s < far_src_cnt; s++) {
                 for (Long k0 = 0; k0 < KDIM0; k0++) {
                   for (Long t = 0; t < trg_cnt; t++) {
@@ -1065,8 +1202,7 @@ namespace sctl {
                 }
               }
             } else {
-              ker_.template KernelMatrix<Real,true>(Mker, Xtrg_near_, X, Xn);
-              #pragma omp parallel for schedule(static)
+              ker_.template KernelMatrix<Real,false>(Mker, Xtrg_near_, X, Xn);
               for (Long s = 0; s < far_src_cnt; s++) {
                 for (Long k0 = 0; k0 < KDIM0; k0++) {
                   for (Long t = 0; t < trg_cnt*KDIM1; t++) {
@@ -1078,18 +1214,26 @@ namespace sctl {
 
             Matrix<Real> K_direct;
             elem_lst->FarFieldDensityOperatorTranspose(K_direct, Mker, j);
-            const Long N = K_near_.Dim(0)*K_near_.Dim(1);
-            if (K_direct.Dim(0) != 0 && K_direct.Dim(1) != 0) {
-              #pragma omp parallel for schedule(static)
-              for (Long k = 0; k < N; k++) K_near_[0][k] -= K_direct[0][k];
-            } else {
-              #pragma omp parallel for schedule(static)
-              for (Long k = 0; k < N; k++) K_near_[0][k] -= Mker[0][k];
+            // Mker/K_direct are source-major (fixed by the FarFieldDensityOperatorTranspose
+            // interface) while K_near_ is target-major, so the subtraction transposes.
+            const Matrix<Real>& Msub = (K_direct.Dim(0) && K_direct.Dim(1) ? K_direct : Mker);
+            const Long nr = K_near_.Dim(0), nc = K_near_.Dim(1);
+            SCTL_ASSERT(Msub.Dim(0) == nc && Msub.Dim(1) == nr);
+            constexpr Long blk_sz = 32; // 32x32 doubles: both tiles stay in L1
+            for (Long i0 = 0; i0 < nr; i0 += blk_sz) {
+              for (Long j0 = 0; j0 < nc; j0 += blk_sz) {
+                const Long i1 = std::min(i0+blk_sz, nr), j1 = std::min(j0+blk_sz, nc);
+                for (Long i = i0; i < i1; i++) {
+                  for (Long j = j0; j < j1; j++) K_near_[i][j] -= Msub[j][i];
+                }
+              }
             }
           }
         }
       }
+      Profile::Toc();
     }
+
     Profile::Toc();
 
     setup_near_flag = true;
@@ -1171,37 +1315,44 @@ namespace sctl {
     }
 
     Vector<Real> U_near(Nelem ? (near_elem_dsp[Nelem-1]+near_elem_cnt[Nelem-1])*KDIM1_ : 0);
-    #pragma omp parallel for if(Nelem > omp_get_max_threads()) schedule(dynamic)
-    for (Long elem_idx = 0; elem_idx < Nelem; elem_idx++) { // Compute near-interactions from precomputed operator matrix
+    #pragma omp parallel for schedule(dynamic)
+    for (Long blk = 0; blk < near_blk_elem.Dim(); blk++) { // Compute near-interactions from precomputed operator matrix
+      const Long elem_idx = near_blk_elem[blk], t0 = near_blk_t0[blk], nt = near_blk_cnt[blk];
       const Long src_dof = elem_nds_cnt[elem_idx]*KDIM0;
-      const Long trg_dof = near_elem_cnt[elem_idx]*KDIM1_;
-      if (src_dof==0 || trg_dof == 0 || K_near_cnt[elem_idx] == 0) continue;
-      SCTL_ASSERT(src_dof * trg_dof == K_near_cnt[elem_idx]*KDIM0*KDIM1_);
-      const Matrix<Real> K_near_(src_dof, trg_dof, K_near.begin() + K_near_dsp[elem_idx]*KDIM0*KDIM1_, false);
-      const Matrix<Real> F_(1, src_dof, (Iterator<Real>)F.begin() + elem_nds_dsp[elem_idx]*KDIM0, false);
-      Matrix<Real> U_(1, trg_dof, U_near.begin() + near_elem_dsp[elem_idx]*KDIM1_, false);
-      Matrix<Real>::GEMM(U_, F_, K_near_);
+      const Long trg_dof = nt*KDIM1_;
+      if (src_dof==0 || trg_dof == 0 || K_near_cnt[elem_idx] == 0) {
+        Matrix<Real> U_(1, trg_dof, U_near.begin() + (near_elem_dsp[elem_idx]+t0)*KDIM1_, false);
+        U_ = 0;
+        continue;
+      }
+      SCTL_ASSERT(src_dof * near_elem_cnt[elem_idx]*KDIM1_ == K_near_cnt[elem_idx]*KDIM0*KDIM1_);
+      // target-major: K.F rather than F.K, and a target range is a contiguous row-block
+      const Matrix<Real> K_near_(trg_dof, src_dof, K_near.begin() + K_near_dsp[elem_idx]*KDIM0*KDIM1_ + t0*KDIM1_*src_dof, false);
+      const Matrix<const Real> F_(src_dof, 1, F.begin() + elem_nds_dsp[elem_idx]*KDIM0, false);
+      Matrix<Real> U_(trg_dof, 1, U_near.begin() + (near_elem_dsp[elem_idx]+t0)*KDIM1_, false);
+      Matrix<Real>::GEMM(U_, K_near_, F_);
     }
 
     for (Long i = 0; i < (Long)elem_lst_map.size(); i++) { // Compute near-interactions matrix-free (if EvalNearInterac is implemented)
       const auto& name = elem_lst_name[i];
       const auto& elem_lst = elem_lst_map.at(name);
       const auto& elem_data = elem_data_map.at(name);
-      if (!elem_lst->MatrixFree()) continue;
-      #pragma omp parallel for if(elem_lst_cnt[i]>4*omp_get_max_threads()) schedule(dynamic)
-      for (Long j = 0; j < elem_lst_cnt[i]; j++) {
-        const Long elem_idx = elem_lst_dsp[i]+j;
-        const Long Ntrg = near_elem_cnt[elem_idx];
-        const Vector<Real> Xt(Ntrg*COORD_DIM, Xtrg_near.begin() + near_elem_dsp[elem_idx]*COORD_DIM, false);
-        const Vector<Real> Xn(Ntrg*(trg_normal_dot_prod_ ? COORD_DIM : 0), Xn_trg_near.begin() + near_elem_dsp[elem_idx]*COORD_DIM, false);
+      // EvalNearInterac must treat Xt as the targets it was handed, not the element's near-list
+      #pragma omp parallel for schedule(dynamic)
+      for (Long blk = 0; blk < near_blk_elem.Dim(); blk++) {
+        const Long elem_idx = near_blk_elem[blk], t0 = near_blk_t0[blk], nt = near_blk_cnt[blk];
+        const Long j = elem_idx - elem_lst_dsp[i];
+        if (j < 0 || j >= elem_lst_cnt[i]) continue; // block belongs to another element list
+        const Vector<Real> Xt(nt*COORD_DIM, Xtrg_near.begin() + (near_elem_dsp[elem_idx]+t0)*COORD_DIM, false);
+        const Vector<Real> Xn(nt*(trg_normal_dot_prod_ ? COORD_DIM : 0), Xn_trg_near.begin() + (near_elem_dsp[elem_idx]+t0)*COORD_DIM, false);
 
         {
           const Long src_dof = elem_nds_cnt[elem_idx]*KDIM0;
-          const Long trg_dof = near_elem_cnt[elem_idx]*KDIM1_;
+          const Long trg_dof = nt*KDIM1_;
           if (src_dof==0 || trg_dof == 0) continue;
           const Vector<Real> F_(src_dof, (Iterator<Real>)F.begin() + elem_nds_dsp[elem_idx]*KDIM0, false);
-          Vector<Real> U_(trg_dof, U_near.begin() + near_elem_dsp[elem_idx]*KDIM1_, false);
-          elem_data.EvalNearInterac(U_, F_, Xt, Xn, ker_, tol_, elem_idx, elem_lst);
+          Vector<Real> U_(trg_dof, U_near.begin() + (near_elem_dsp[elem_idx]+t0)*KDIM1_, false);
+          elem_data.EvalNearInterac(U_, F_, Xt, Xn, ker_, tol_, j, elem_lst.get());
         }
       }
     }

@@ -18,6 +18,8 @@
 #include "sctl/matrix.txx"           // for Matrix::operator[], Matrix::Matr...
 #include "sctl/quadrule.hpp"         // for ChebQuadRule
 #include "sctl/quadrule.txx"         // for ChebQuadRule::ComputeNdsWts
+#include "sctl/scratch_pool.hpp"     // for ScratchBuf
+#include "sctl/scratch_pool.txx"     // for ScratchBuf
 #include "sctl/static-array.hpp"     // for StaticArray
 #include "sctl/vector.hpp"           // for Vector
 #include "sctl/vector.txx"           // for Vector::Vector<ValueType>, Vecto...
@@ -119,7 +121,7 @@ namespace sctl {
     { // Set M_time_step
       Vector<ValueType> qx, qw;
       ChebQuadRule<ValueType>::ComputeNdsWts(&qx, &qw, order);
-      const Matrix<ValueType> Mw(order, 1, (Iterator<ValueType>)qw.begin(), false);
+      const Matrix<const ValueType> Mw(order, 1, qw.begin(), false);
       SCTL_ASSERT(qw.Dim() == order);
       SCTL_ASSERT(qx.Dim() == order);
 
@@ -151,31 +153,19 @@ namespace sctl {
     const Long DOF = Mu0.Dim(1);
     SCTL_ASSERT(Mu0.Dim(0) == 1 || Mu0.Dim(0) == order);
 
-    const Integer Nbuff = 1000;
-    StaticArray<Real,Nbuff> buff;
-    StaticArray<Integer,50> failed_flag_buff;
-    SCTL_ASSERT(order<50);
-
-    Matrix<Real> Mu;
-    Matrix<Real> Mf0, Mf1;
-    Matrix<Real> Mv, Mv_change;
-    Vector<Real> picard_err;
-    if (Nbuff < 1*order*DOF) Mu.ReInit(order, DOF);
-    else Mu.ReInit(order, DOF, buff + 0*order*DOF, false);
-    if (Nbuff < 2*order*DOF) Mf0.ReInit(order, DOF);
-    else Mf0.ReInit(order, DOF, buff + 1*order*DOF, false);
-    if (Nbuff < 3*order*DOF) Mf1.ReInit(order, DOF);
-    else Mf1.ReInit(order, DOF, buff + 2*order*DOF, false);
-    if (Nbuff < 4*order*DOF) Mv.ReInit(order, DOF);
-    else Mv.ReInit(order, DOF, buff + 3*order*DOF, false);
-    if (Nbuff < 5*order*DOF) Mv_change.ReInit(order, DOF);
-    else Mv_change.ReInit(order, DOF, buff + 4*order*DOF, false);
-    if (Nbuff < 5*order*DOF+max_picard_iter) picard_err.ReInit(max_picard_iter);
-    else picard_err.ReInit(max_picard_iter, buff + 5*order*DOF, false);
+    ScratchBuf<Real> buff_storage(5*order*DOF + max_picard_iter);
+    Iterator<Real> buff = buff_storage.begin();
+    Matrix<Real> Mu       (order, DOF,        buff + 0*order*DOF, false);
+    Matrix<Real> Mf0      (order, DOF,        buff + 1*order*DOF, false);
+    Matrix<Real> Mf1      (order, DOF,        buff + 2*order*DOF, false);
+    Matrix<Real> Mv       (order, DOF,        buff + 3*order*DOF, false);
+    Matrix<Real> Mv_change(order, DOF,        buff + 4*order*DOF, false);
+    Vector<Real> picard_err(max_picard_iter,  buff + 5*order*DOF, false);
+    ScratchBuf<Integer> failed_flag_buff(order); // batch_size is at most order
 
     { // Evaluate Mf0 at Mu0
       const Long batch_size = Mu0.Dim(0);
-      Vector<Integer> failed_flag(batch_size, failed_flag_buff, false);
+      Vector<Integer> failed_flag(batch_size, failed_flag_buff.begin(), false);
       Matrix<Real> Mf0_(batch_size, DOF, Mf0.begin(), false);
       F(&Mf0_, &failed_flag, Mu0, 0, 0);
       SCTL_ASSERT(!failed_flag[0]); // should not fail at initial condition
@@ -207,7 +197,7 @@ namespace sctl {
 
         const Long batch_size = order-1;
         Matrix<Real> Mf1_(batch_size, DOF, Mf1[1], false);
-        Vector<Integer> failed_flag(batch_size, failed_flag_buff, false);
+        Vector<Integer> failed_flag(batch_size, failed_flag_buff.begin(), false);
         F(&Mf1_, &failed_flag, Matrix<Real>(batch_size,DOF,Mu[1],false), picard_iter, 1);
         for (Long i = 1; i < order; i++) { // fall back to Mf0 if evaluation fails a some sub-step
           if (failed_flag[i-1]) {

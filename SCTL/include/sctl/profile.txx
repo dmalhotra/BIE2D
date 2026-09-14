@@ -2,11 +2,11 @@
 #define _SCTL_PROFILE_TXX_
 
 #include <sstream>            // for stringstream
-#include <omp.h>              // for omp_get_wtime
-#include <stdio.h>            // for size_t, sprintf
+#include <stdio.h>            // for size_t, snprintf
 #include <algorithm>          // for max
 #include <array>              // for array
 #include <atomic>             // for atomic, memory_order
+#include <deque>              // for deque
 #include <iomanip>            // for operator<<, setw
 #include <iostream>           // for basic_ostream, operator<<, cout, left
 #include <map>                // for map
@@ -15,7 +15,7 @@
 #include <string>             // for basic_string, allocator, char_traits
 #include <vector>             // for vector
 
-#include "sctl/common.hpp"    // for Long, SCTL_ASSERT, Integer, SCTL_ASSERT...
+#include "sctl/common.hpp"    // for Long, SCTL_ASSERT, Integer, SCTL_ASSERT, SCTL_GET_WTIME...
 #include "sctl/profile.hpp"   // for Profile, ProfileCounter, operator*, ope...
 #include "sctl/comm.hpp"      // for CommOp, Comm
 #include "sctl/comm.txx"      // for Comm::Rank, Comm::Size, Comm::Allreduce  // TODO: remove circular include (profile.txx -> comm.txx -> vector.txx -> profile.txx)
@@ -220,7 +220,7 @@ namespace sctl {
   inline Profile::ProfExpr operator/(const Profile::ProfExpr& u, const Profile::ProfExpr& v) {
     const auto op = [](std::vector<double> x, const std::vector<double>& y, const Comm* comm) {
       SCTL_ASSERT(x.size() == y.size());
-      for (Long i = 0; i < (Long)x.size(); i++) x[i] /= y[i];
+      for (Long i = 0; i < (Long)x.size(); i++) x[i] = (y[i] != 0) ? x[i] / y[i] : 0;
       return x;
     };
     return Profile::ExprBinary<decltype(op)>(u, v, op);
@@ -249,10 +249,12 @@ namespace sctl {
     std::vector<std::string> n_log;
     std::vector<double> counter_log;
 
-    std::array<std::atomic<Long>, Nfield> counters;
+    std::array<Long, Nfield> counters; // reduced snapshot, written on the master thread at Tic/Toc
+    struct alignas(64) CounterRow { std::array<Long, Nfield> c; }; // padded to avoid false sharing
+    std::deque<CounterRow> thread_counters; // per-thread accumulators; a deque so rows never move
     std::map<std::string, ProfExpr> prof_fields;
 
-    inline ProfileData() : t0(omp_get_wtime()), enable_state(false) {
+    inline ProfileData() : t0(SCTL_GET_WTIME()), enable_state(false) {
       constexpr double gb_scale = (1./1024/1024/1024);
       for (auto& x : counters) x = 0;
 
@@ -412,7 +414,7 @@ namespace sctl {
       std::vector<std::string> column_str(N);
       for (Long j = 0; j < N; j++) {
         char buffer[100];
-        sprintf(buffer, format_lst[i].c_str(), column[j]);
+        snprintf(buffer, sizeof(buffer), format_lst[i].c_str(), column[j]);
         column_str[j] = std::string(buffer);
         max_width = std::max(max_width, (Long)column_str[j].size());
       }
@@ -461,7 +463,21 @@ namespace sctl {
   #if SCTL_PROFILE >= 0
 
   inline Long Profile::IncrementCounter(const ProfileCounter prof_field, const Long x) {
-    return GetProfData().counters[(Long)prof_field].fetch_add(x,std::memory_order_relaxed);
+    ProfileData& prof = GetProfData();
+    // Per thread, not by thread number: that numbers a position in the team, not a row.
+    static thread_local ProfileData::CounterRow* row = nullptr;
+    if (row == nullptr) {
+      #pragma omp critical(SCTL_PROFILE_COUNTERS)
+      {
+        prof.thread_counters.emplace_back();
+        row = &prof.thread_counters.back();
+        row->c.fill(0);
+      }
+    }
+    Long& c = row->c[(Long)prof_field];
+    const Long old = c;
+    c += x;
+    return old;
   }
 
   inline void Profile::Tic(const char* name_, const Comm* comm_, bool sync_, Integer verbose) {
@@ -484,7 +500,13 @@ namespace sctl {
 
       prof.e_log.push_back(true);
       prof.n_log.push_back(prof.name.top());
-      prof.counters[(Long)ProfileCounter::TIME].store((Long)((omp_get_wtime()-prof.t0)*1e9),std::memory_order_relaxed);
+      #pragma omp critical(SCTL_PROFILE_COUNTERS)
+      for (Long i = 0; i < Nfield; i++) { // reduce per-thread counters
+        Long s = 0;
+        for (const auto& r : prof.thread_counters) s += r.c[i];
+        prof.counters[i] = s;
+      }
+      prof.counters[(Long)ProfileCounter::TIME] = (Long)((SCTL_GET_WTIME()-prof.t0)*1e9);
       for (Long i = 0; i < Nfield; i++) prof.counter_log.push_back(prof.counters[i]);
     }
   }
@@ -504,7 +526,13 @@ namespace sctl {
 
       prof.e_log.push_back(false);
       prof.n_log.push_back(name_);
-      prof.counters[(Long)ProfileCounter::TIME].store((Long)((omp_get_wtime()-prof.t0)*1e9),std::memory_order_relaxed);
+      #pragma omp critical(SCTL_PROFILE_COUNTERS)
+      for (Long i = 0; i < Nfield; i++) { // reduce per-thread counters
+        Long s = 0;
+        for (const auto& r : prof.thread_counters) s += r.c[i];
+        prof.counters[i] = s;
+      }
+      prof.counters[(Long)ProfileCounter::TIME] = (Long)((SCTL_GET_WTIME()-prof.t0)*1e9);
       for (Long i = 0; i < Nfield; i++) prof.counter_log.push_back(prof.counters[i]);
 
   #ifndef NDEBUG

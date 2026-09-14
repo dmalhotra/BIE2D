@@ -3,6 +3,7 @@
 
 #include <ostream>            // for ostream
 #include <initializer_list>   // for initializer_list
+#include <type_traits>        // for remove_const
 #include <vector>             // for vector
 
 #include "sctl/common.hpp"    // for Long, sctl
@@ -10,8 +11,9 @@
 
 namespace sctl {
 
-// forward declaration
+// forward declarations
 template <class ValueType> Iterator<ValueType> NullIterator();
+template <class ValueType> class ScratchBuf;
 
 /**
  * A contiguous array of elements. The elements can be accesses with a non-negative index.  The vector can be the
@@ -22,7 +24,7 @@ template <class ValueType> Iterator<ValueType> NullIterator();
  */
 template <class ValueType> class Vector {
  public:
-  typedef ValueType value_type; /**< Type of the elements stored in the vector. */
+  typedef typename std::remove_const<ValueType>::type value_type; /**< Type of the elements stored in the vector, without const. */
   typedef ValueType& reference; /**< Reference to an element in the vector. */
   typedef const ValueType& const_reference; /**< Const reference to an element in the vector. */
   typedef Iterator<ValueType> iterator; /**< Iterator for traversing the vector. */
@@ -41,8 +43,13 @@ template <class ValueType> class Vector {
    * @param dim Dimension of the vector.
    * @param data Pointer to the data.
    * @param own_data Flag indicating ownership of data.
+   * @param disable_reinit If true, this Vector's dim and data_ptr are immutable
+   *   for the rest of its lifetime: ReInit, Swap, and resizing assignment all
+   *   trigger SCTL_ASSERT. Element-wise reads/writes are still allowed.
+   *   Useful for views into externally-owned storage (e.g. ScratchBuf) where
+   *   accidental rebinding would silently decouple the view from its backing.
    */
-  explicit Vector(Long dim, Iterator<ValueType> data = NullIterator<ValueType>(), bool own_data = true);
+  explicit Vector(Long dim, Iterator<ValueType> data = NullIterator<ValueType>(), bool own_data = true, bool disable_reinit = false);
 
   /**
    * Copy constructor.
@@ -50,6 +57,12 @@ template <class ValueType> class Vector {
    * @param V Another vector to copy from.
    */
   Vector(const Vector& V);
+
+  /**
+   * Move constructor. Steals ownership from `V`; leaves `V` empty
+   * (`Dim() == 0`) and in a valid destructible state.
+   */
+  Vector(Vector&& V) noexcept;
 
   /**
    * Constructor from std::vector.
@@ -66,12 +79,32 @@ template <class ValueType> class Vector {
   explicit Vector(std::initializer_list<ValueType> V);
 
   /**
+   * Construct a non-owning view of a ScratchBuf. The Vector aliases the
+   * buffer's storage and does not free it; the ScratchBuf owns the lifetime.
+   *
+   * The ctor is `explicit` to prevent silent copies on assignment:
+   * `existing = scratch_buf;` won't compile, because `operator=(Vector&&)`
+   * cannot reach this ctor through copy-initialization. Use direct-init
+   * (`Vector<T> v(buf);`) for a view.
+   *
+   * By default the view is constructed with `fixed_size = true`, so calls
+   * that would resize/rebind it (`ReInit`, `Swap`, resizing `operator=`)
+   * trip `SCTL_ASSERT` in debug — protecting the ScratchBuf storage from
+   * being silently abandoned. Pass `disable_reinit = false` to opt out
+   * (e.g. when the view's contents will be moved into an owning Vector
+   * via `Swap`).
+   */
+  explicit Vector(ScratchBuf<ValueType>& buf, bool disable_reinit = true);
+
+  /**
    * Destructor.
    */
   ~Vector();
 
   /**
-   * Swap the contents of two vectors.
+   * Swap the contents of two vectors. O(1) — no elements are copied. Ownership
+   * travels with the buffer, so it is safe to swap an owning vector with a
+   * non-owning view.
    *
    * @param v1 Vector to swap with.
    */
@@ -84,7 +117,7 @@ template <class ValueType> class Vector {
    * @param data New data pointer.
    * @param own_data Flag indicating ownership of new data.
    */
-  void ReInit(Long dim, Iterator<ValueType> data = NullIterator<ValueType>(), bool own_data = true);
+  void ReInit(Long dim, Iterator<ValueType> data = NullIterator<ValueType>(), bool own_data = true, bool disable_reinit = false);
 
   /**
    * Write the vector to a file.
@@ -121,9 +154,14 @@ template <class ValueType> class Vector {
    *
    * @return Long Dimension of the vector.
    */
-  Long Dim() const;
+  [[nodiscard]] Long Dim() const noexcept;
 
-  //Long Capacity() const;
+  /**
+   * Check whether the vector owns its data (false for views of external memory).
+   *
+   * @return bool True if the vector owns and will deallocate its data.
+   */
+  [[nodiscard]] bool OwnData() const noexcept;
 
   /**
    * Set all elements of the vector to zero.
@@ -135,28 +173,28 @@ template <class ValueType> class Vector {
    *
    * @return Iterator<ValueType> Iterator pointing to the beginning of the vector.
    */
-  Iterator<ValueType> begin();
+  [[nodiscard]] Iterator<ValueType> begin();
 
   /**
    * Get a const iterator pointing to the beginning of the vector.
    *
    * @return ConstIterator<ValueType> Const iterator pointing to the beginning of the vector.
    */
-  ConstIterator<ValueType> begin() const;
+  [[nodiscard]] ConstIterator<ValueType> begin() const;
 
   /**
    * Get an iterator pointing to the end of the vector.
    *
    * @return Iterator<ValueType> Iterator pointing to the end of the vector.
    */
-  Iterator<ValueType> end();
+  [[nodiscard]] Iterator<ValueType> end();
 
   /**
    * Get a const iterator pointing to the end of the vector.
    *
    * @return ConstIterator<ValueType> Const iterator pointing to the end of the vector.
    */
-  ConstIterator<ValueType> end() const;
+  [[nodiscard]] ConstIterator<ValueType> end() const;
 
   /**
    * Add an element to the end of the vector.
@@ -202,6 +240,16 @@ template <class ValueType> class Vector {
   Vector& operator=(const Vector& V);
 
   /**
+   * Move assignment. Swaps state with `V` when both sides own their buffers;
+   * otherwise copies `V`'s contents into `*this` (resizing as needed).
+   *
+   * @note If `*this` is a non-owning view and `V`'s size differs, the view
+   *       binding is lost — `*this` becomes an owning vector with a fresh
+   *       buffer. Same applies to copy-assignment.
+   */
+  Vector& operator=(Vector&& V) noexcept;
+
+  /**
    * Addition assignment operator.
    *
    * @param V Vector to add.
@@ -239,7 +287,7 @@ template <class ValueType> class Vector {
    * @param V Vector to add.
    * @return Vector Resultant vector after addition.
    */
-  Vector operator+(const Vector& V) const;
+  [[nodiscard]] Vector operator+(const Vector& V) const;
 
   /**
    * Subtraction operator.
@@ -247,7 +295,7 @@ template <class ValueType> class Vector {
    * @param V Vector to subtract.
    * @return Vector Resultant vector after subtraction.
    */
-  Vector operator-(const Vector& V) const;
+  [[nodiscard]] Vector operator-(const Vector& V) const;
 
   /**
    * Multiplication operator.
@@ -255,7 +303,7 @@ template <class ValueType> class Vector {
    * @param V Vector to multiply.
    * @return Vector Resultant vector after multiplication.
    */
-  Vector operator*(const Vector& V) const;
+  [[nodiscard]] Vector operator*(const Vector& V) const;
 
   /**
    * Division operator.
@@ -263,14 +311,14 @@ template <class ValueType> class Vector {
    * @param V Vector to divide.
    * @return Vector Resultant vector after division.
    */
-  Vector operator/(const Vector& V) const;
+  [[nodiscard]] Vector operator/(const Vector& V) const;
 
   /**
    * Negation operator.
    *
    * @return Vector Negated vector.
    */
-  Vector operator-() const ;
+  [[nodiscard]] Vector operator-() const ;
 
   // Vector-Scalar operations
 
@@ -326,7 +374,7 @@ template <class ValueType> class Vector {
    * @param s Scalar value to add.
    * @return Vector Resultant vector after addition.
    */
-  template <class VType> Vector operator+(VType s) const;
+  template <class VType> [[nodiscard]] Vector operator+(VType s) const;
 
   /**
    * Subtraction operator with a scalar.
@@ -335,7 +383,7 @@ template <class ValueType> class Vector {
    * @param s Scalar value to subtract.
    * @return Vector Resultant vector after subtraction.
    */
-  template <class VType> Vector operator-(VType s) const;
+  template <class VType> [[nodiscard]] Vector operator-(VType s) const;
 
   /**
    * Multiplication operator with a scalar.
@@ -344,7 +392,7 @@ template <class ValueType> class Vector {
    * @param s Scalar value to multiply.
    * @return Vector Resultant vector after multiplication.
    */
-  template <class VType> Vector operator*(VType s) const;
+  template <class VType> [[nodiscard]] Vector operator*(VType s) const;
 
   /**
    * Division operator with a scalar.
@@ -353,7 +401,7 @@ template <class ValueType> class Vector {
    * @param s Scalar value to divide.
    * @return Vector Resultant vector after division.
    */
-  template <class VType> Vector operator/(VType s) const;
+  template <class VType> [[nodiscard]] Vector operator/(VType s) const;
 
  private:
   /**
@@ -363,23 +411,24 @@ template <class ValueType> class Vector {
    * @param data Pointer to the data.
    * @param own_data Flag indicating ownership of data.
    */
-  void Init(Long dim, Iterator<ValueType> data = NullIterator<ValueType>(), bool own_data = true);
+  void Init(Long dim, Iterator<ValueType> data = NullIterator<ValueType>(), bool own_data = true, bool disable_reinit = false);
 
   Long dim; /**< Dimension of the vector. */
   Long capacity; /**< Capacity of the vector. */
   Iterator<ValueType> data_ptr; /**< Pointer to the data. */
   bool own_data; /**< Flag indicating ownership of the data. */
+  bool disable_reinit_; /**< When true, ReInit/Swap/resizing assignment trigger SCTL_ASSERT. */
 };
 
 // Function template declarations for vector-scalar operations...
 
-template <class VType, class ValueType> Vector<ValueType> operator+(VType s, const Vector<ValueType>& V);
+template <class VType, class ValueType> [[nodiscard]] Vector<ValueType> operator+(VType s, const Vector<ValueType>& V);
 
-template <class VType, class ValueType> Vector<ValueType> operator-(VType s, const Vector<ValueType>& V);
+template <class VType, class ValueType> [[nodiscard]] Vector<ValueType> operator-(VType s, const Vector<ValueType>& V);
 
-template <class VType, class ValueType> Vector<ValueType> operator*(VType s, const Vector<ValueType>& V);
+template <class VType, class ValueType> [[nodiscard]] Vector<ValueType> operator*(VType s, const Vector<ValueType>& V);
 
-template <class VType, class ValueType> Vector<ValueType> operator/(VType s, const Vector<ValueType>& V);
+template <class VType, class ValueType> [[nodiscard]] Vector<ValueType> operator/(VType s, const Vector<ValueType>& V);
 
 template <class ValueType> std::ostream& operator<<(std::ostream& output, const Vector<ValueType>& V);
 

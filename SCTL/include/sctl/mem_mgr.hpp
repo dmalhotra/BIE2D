@@ -9,9 +9,10 @@
 
 #include "sctl/common.hpp"  // for Long, sctl
 
-// TODO: Implement fast stack allocation.
-
 namespace sctl {
+
+/** Best-effort MADV_HUGEPAGE on the page-aligned interior of a large allocation (no-op below 2MB or off Linux). */
+inline void advise_huge_pages(void* ptr, Long bytes);
 
 /**
  * MemoryManager class declaration.
@@ -20,7 +21,7 @@ class MemoryManager {
 
  public:
   static constexpr char init_mem_val = 42;
-  static constexpr Long end_padding = 64;
+  static constexpr Long end_padding = SCTL_MEM_ALIGN;
 
   /**
    * Header data for each memory block.
@@ -113,9 +114,10 @@ class MemoryManager {
 
 /**
  * Aligned allocation as an alternative to new. Uses placement new to
- * construct objects.
+ * construct objects. The returned iterator must be released via
+ * `aligned_delete`, so discarding it leaks the allocation.
  */
-template <class ValueType> Iterator<ValueType> aligned_new(Long n_elem = 1, const MemoryManager* mem_mgr = &MemoryManager::glbMemMgr());
+template <class ValueType> [[nodiscard]] Iterator<ValueType> aligned_new(Long n_elem = 1, const MemoryManager* mem_mgr = &MemoryManager::glbMemMgr());
 
 /**
  * Aligned de-allocation as an alternative to delete. Calls the object

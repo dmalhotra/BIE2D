@@ -27,7 +27,7 @@
 namespace sctl {
 namespace mat {
 
-template <class ValueType> inline void gemm(char TransA, char TransB, int M, int N, int K, ValueType alpha, Iterator<ValueType> A, int lda, Iterator<ValueType> B, int ldb, ValueType beta, Iterator<ValueType> C, int ldc) {
+template <class ValueType> inline void gemm(char TransA, char TransB, int M, int N, int K, ValueType alpha, ConstIterator<ValueType> A, int lda, ConstIterator<ValueType> B, int ldb, ValueType beta, Iterator<ValueType> C, int ldc) {
   if ((TransA == 'N' || TransA == 'n') && (TransB == 'N' || TransB == 'n')) {
     #pragma omp parallel for schedule(static)
     for (Long n = 0; n < N; n++) {    // Columns of C
@@ -36,7 +36,7 @@ template <class ValueType> inline void gemm(char TransA, char TransB, int M, int
         for (Long k = 0; k < K; k++) {
           AxB += A[m + lda * k] * B[k + ldb * n];
         }
-        C[m + ldc * n] = alpha * AxB + (beta == 0 ? 0 : beta * C[m + ldc * n]);
+        C[m + ldc * n] = alpha * AxB + (beta == ValueType(0) ? ValueType(0) : beta * C[m + ldc * n]);
       }
     }
   } else if (TransA == 'N' || TransA == 'n') {
@@ -47,7 +47,7 @@ template <class ValueType> inline void gemm(char TransA, char TransB, int M, int
         for (Long k = 0; k < K; k++) {
           AxB += A[m + lda * k] * B[n + ldb * k];
         }
-        C[m + ldc * n] = alpha * AxB + (beta == 0 ? 0 : beta * C[m + ldc * n]);
+        C[m + ldc * n] = alpha * AxB + (beta == ValueType(0) ? ValueType(0) : beta * C[m + ldc * n]);
       }
     }
   } else if (TransB == 'N' || TransB == 'n') {
@@ -58,7 +58,7 @@ template <class ValueType> inline void gemm(char TransA, char TransB, int M, int
         for (Long k = 0; k < K; k++) {
           AxB += A[k + lda * m] * B[k + ldb * n];
         }
-        C[m + ldc * n] = alpha * AxB + (beta == 0 ? 0 : beta * C[m + ldc * n]);
+        C[m + ldc * n] = alpha * AxB + (beta == ValueType(0) ? ValueType(0) : beta * C[m + ldc * n]);
       }
     }
   } else {
@@ -69,19 +69,23 @@ template <class ValueType> inline void gemm(char TransA, char TransB, int M, int
         for (Long k = 0; k < K; k++) {
           AxB += A[k + lda * m] * B[n + ldb * k];
         }
-        C[m + ldc * n] = alpha * AxB + (beta == 0 ? 0 : beta * C[m + ldc * n]);
+        C[m + ldc * n] = alpha * AxB + (beta == ValueType(0) ? ValueType(0) : beta * C[m + ldc * n]);
       }
     }
   }
 }
 
 #if defined(SCTL_HAVE_BLAS)
-template <> inline void gemm<float>(char TransA, char TransB, int M, int N, int K, float alpha, Iterator<float> A, int lda, Iterator<float> B, int ldb, float beta, Iterator<float> C, int ldc) { sgemm_(&TransA, &TransB, &M, &N, &K, &alpha, &A[0], &lda, &B[0], &ldb, &beta, &C[0], &ldc); }
+template <> inline void gemm<float>(char TransA, char TransB, int M, int N, int K, float alpha, ConstIterator<float> A, int lda, ConstIterator<float> B, int ldb, float beta, Iterator<float> C, int ldc) { sgemm_(&TransA, &TransB, &M, &N, &K, &alpha, &A[0], &lda, &B[0], &ldb, &beta, &C[0], &ldc); }
 
-template <> inline void gemm<double>(char TransA, char TransB, int M, int N, int K, double alpha, Iterator<double> A, int lda, Iterator<double> B, int ldb, double beta, Iterator<double> C, int ldc) { dgemm_(&TransA, &TransB, &M, &N, &K, &alpha, &A[0], &lda, &B[0], &ldb, &beta, &C[0], &ldc); }
+template <> inline void gemm<double>(char TransA, char TransB, int M, int N, int K, double alpha, ConstIterator<double> A, int lda, ConstIterator<double> B, int ldb, double beta, Iterator<double> C, int ldc) { dgemm_(&TransA, &TransB, &M, &N, &K, &alpha, &A[0], &lda, &B[0], &ldb, &beta, &C[0], &ldc); }
 #endif
 
 //#define SCTL_SVD_DEBUG
+
+/** One rotation updates two columns, O(dim) work, and SVD issues O(dim^2) of them, so below this
+ * the parallel region costs more than the update it guards. Measured crossover on four threads. */
+static constexpr Long givens_omp_min = 512;
 
 template <class ValueType> static inline void GivensL(Iterator<ValueType> S_, const StaticArray<Long, 2> &dim, Long m, ValueType a, ValueType b) {
   auto S = [S_,dim](Long i, Long j) -> ValueType& { return S_[(i) * dim[1] + (j)]; };
@@ -91,7 +95,7 @@ template <class ValueType> static inline void GivensL(Iterator<ValueType> S_, co
   ValueType c = a / r;
   ValueType s = -b / r;
 
-#pragma omp parallel for
+#pragma omp parallel for if (dim[1] >= givens_omp_min)
   for (Long i = 0; i < dim[1]; i++) {
     ValueType S0 = S(m + 0, i);
     ValueType S1 = S(m + 1, i);
@@ -111,7 +115,7 @@ template <class ValueType> static inline void GivensR(Iterator<ValueType> S_, co
   ValueType c = a / r;
   ValueType s = -b / r;
 
-#pragma omp parallel for
+#pragma omp parallel for if (dim[0] >= givens_omp_min)
   for (Long i = 0; i < dim[0]; i++) {
     ValueType S0 = S(i, m + 0);
     ValueType S1 = S(i, m + 1);

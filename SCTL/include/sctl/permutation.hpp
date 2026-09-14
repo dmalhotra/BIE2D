@@ -27,6 +27,15 @@ template <class ValueType> class Permutation {
   Permutation() {}
 
   /**
+   * Copy and move operations follow `Vector`'s semantics: copy duplicates the
+   * underlying `perm`/`scal` buffers, move steals them.
+   */
+  Permutation(const Permutation&) = default;
+  Permutation(Permutation&&) noexcept = default;
+  Permutation& operator=(const Permutation&) = default;
+  Permutation& operator=(Permutation&&) noexcept = default;
+
+  /**
    * Constructs a permutation operator with the given size.
    *
    * @param size The size of the permutation operator.
@@ -46,21 +55,21 @@ template <class ValueType> class Permutation {
    *
    * @return The permutation operator represented as a regular matrix.
    */
-  Matrix<ValueType> GetMatrix() const;
+  [[nodiscard]] Matrix<ValueType> GetMatrix() const;
 
   /**
    * Returns the dimension of the permutation operator.
    *
    * @return The dimension of the permutation operator.
    */
-  Long Dim() const;
+  [[nodiscard]] Long Dim() const noexcept;
 
   /**
    * Computes the transpose of the permutation operator.
    *
    * @return The transpose of the permutation operator.
    */
-  Permutation<ValueType> Transpose();
+  [[nodiscard]] Permutation<ValueType> Transpose() const;
 
   /**
    * Multiplies the permutation operator by a scalar value.
@@ -84,7 +93,7 @@ template <class ValueType> class Permutation {
    * @param s The scalar value to multiply by.
    * @return The resulting permutation operator.
    */
-  Permutation<ValueType> operator*(ValueType s) const;
+  [[nodiscard]] Permutation<ValueType> operator*(ValueType s) const;
 
   /**
    * Divides the permutation operator by a scalar value.
@@ -92,7 +101,7 @@ template <class ValueType> class Permutation {
    * @param s The scalar value to divide by.
    * @return The resulting permutation operator.
    */
-  Permutation<ValueType> operator/(ValueType s) const;
+  [[nodiscard]] Permutation<ValueType> operator/(ValueType s) const;
 
   /**
    * Multiplies two permutation matrices together.
@@ -100,7 +109,7 @@ template <class ValueType> class Permutation {
    * @param P The permutation operator to multiply with.
    * @return The resulting permutation operator.
    */
-  Permutation<ValueType> operator*(const Permutation<ValueType>& P) const;
+  [[nodiscard]] Permutation<ValueType> operator*(const Permutation<ValueType>& P) const;
 
   /**
    * Multiplies a matrix by the permutation operator.
@@ -108,7 +117,7 @@ template <class ValueType> class Permutation {
    * @param M The matrix to multiply with.
    * @return The resulting matrix after permutation.
    */
-  Matrix<ValueType> operator*(const Matrix<ValueType>& M) const;
+  [[nodiscard]] Matrix<ValueType> operator*(const Matrix<ValueType>& M) const;
 
   /**
    * The permutation vector.
@@ -128,7 +137,7 @@ template <class ValueType> class Permutation {
  * @param P The permutation operator.
  * @return The resulting permutation operator.
  */
-template <class ValueType> Permutation<ValueType> operator*(ValueType s, const Permutation<ValueType>& P) { return P * s; }
+template <class ValueType> [[nodiscard]] Permutation<ValueType> operator*(ValueType s, const Permutation<ValueType>& P) { return P * s; }
 
 /**
  * Multiplies a matrix by the permutation operator.
@@ -137,7 +146,7 @@ template <class ValueType> Permutation<ValueType> operator*(ValueType s, const P
  * @param P The permutation operator.
  * @return The resulting matrix after permutation.
  */
-template <class ValueType> Matrix<ValueType> operator*(const Matrix<ValueType>& M, const Permutation<ValueType>& P);
+template <class ValueType> [[nodiscard]] Matrix<ValueType> operator*(const Matrix<ValueType>& M, const Permutation<ValueType>& P);
 
 /**
  * Overloaded stream insertion operator to output the permutation operator to the specified output stream.

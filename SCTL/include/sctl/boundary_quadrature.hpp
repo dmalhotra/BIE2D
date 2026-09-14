@@ -32,7 +32,7 @@
 #include "sctl/vector.hpp"            // for Vector
 #include "sctl/vector.txx"            // for Vector::operator[], Vector::begin
 #include "sctl/vtudata.hpp"           // for VTUData
-#include "sctl/vtudata.txx"           // for VTUData::AddElems, VTUData::Wri...
+#include "sctl/vtudata.txx"           // for VTUData::WriteVTK
 
 namespace sctl {
 
@@ -135,7 +135,7 @@ template <class Real, Integer DIM, Integer ORDER> class Basis {
 
       if (dX.Dim() != X.Dim()*DIM) dX.ReInit(X.Dim()*DIM);
       for (Long i = 0; i < X.Dim(); i++) {
-        const Matrix<ValueType> Vi(1, Size(), (Iterator<ValueType>)(ConstIterator<ValueType>)X[i].NodeValues_, false);
+        const Matrix<const ValueType> Vi(1, Size(), (ConstIterator<ValueType>)X[i].NodeValues_, false);
         for (Integer k = 0; k < DIM; k++) {
           Matrix<ValueType> Vo(1, Size(), dX[i*DIM+k].NodeValues_, false);
           Matrix<ValueType>::GEMM(Vo, Vi, GradOp[k]);
@@ -194,7 +194,7 @@ template <class Real, Integer DIM, Integer ORDER> class Basis {
       SCTL_ASSERT(M.Dim(0) == Size());
       if (Y.Dim(0) != N0 || Y.Dim(1) != N1) Y.ReInit(N0, N1);
       for (Long i = 0; i < N0; i++) {
-        const Matrix<ValueType> X_(1,Size(),(Iterator<ValueType>)(ConstIterator<ValueType>)X[i].NodeValues_,false);
+        const Matrix<const ValueType> X_(1,Size(),(ConstIterator<ValueType>)X[i].NodeValues_,false);
         Matrix<ValueType> Y_(1,N1,Y[i],false);
         Matrix<ValueType>::GEMM(Y_,X_,M);
       }
@@ -256,8 +256,103 @@ template <Integer COORD_DIM, class Basis> class ElemList {
       return X_;
     }
 
+    void WriteToVTU(VTUData& vtu, Integer order, const Comm& comm = Comm::Self()) const {
+      SCTL_UNUSED(comm);
+      constexpr Integer ElemDim = ElemList::ElemDim();
+      Long N0 = vtu.coord.Dim() / COORD_DIM;
+      Long NElem = this->NElem();
+
+      Matrix<CoordType> nodes = VTK_Nodes_<CoordType>(order);
+      Integer Nnodes = sctl::pow<ElemDim,Integer>(order);
+      SCTL_ASSERT(nodes.Dim(0) == ElemDim);
+      SCTL_ASSERT(nodes.Dim(1) == Nnodes);
+      { // Set coord
+        Matrix<CoordType> vtk_coord;
+        auto M = CoordBasis::SetupEval(nodes);
+        CoordBasis::Eval(vtk_coord, this->ElemVector(), M);
+        for (Long k = 0; k < NElem; k++) {
+          for (Integer i = 0; i < Nnodes; i++) {
+            constexpr Integer dim = (COORD_DIM < 3 ? COORD_DIM : 3);
+            for (Integer j = 0; j < dim; j++) {
+              vtu.coord.PushBack((VTUData::VTKReal)vtk_coord[k*COORD_DIM+j][i]);
+            }
+            for (Integer j = dim; j < 3; j++) {
+              vtu.coord.PushBack((VTUData::VTKReal)0);
+            }
+          }
+        }
+      }
+
+      if (ElemDim == 2) {
+        for (Long k = 0; k < NElem; k++) {
+          for (Integer i = 0; i < order-1; i++) {
+            for (Integer j = 0; j < order-1; j++) {
+              Long idx = k*Nnodes + i*order + j;
+              vtu.connect.PushBack(N0+idx);
+              vtu.connect.PushBack(N0+idx+1);
+              vtu.connect.PushBack(N0+idx+order+1);
+              vtu.connect.PushBack(N0+idx+order);
+              vtu.offset.PushBack(vtu.connect.Dim());
+              vtu.types.PushBack(9);
+            }
+          }
+        }
+      } else {
+        // TODO
+        SCTL_ASSERT(false);
+      }
+    }
+
+    template <class ValueBasis> void WriteToVTU(VTUData& vtu, const Vector<ValueBasis>& elem_value, Integer order, const Comm& comm = Comm::Self()) const {
+      constexpr Integer ElemDim = ElemList::ElemDim();
+      using ValueType = typename ValueBasis::ValueType;
+      Long NElem = this->NElem();
+
+      Integer dof = (NElem==0 ? 0 : elem_value.Dim() / NElem);
+      SCTL_ASSERT(elem_value.Dim() == NElem * dof);
+      WriteToVTU(vtu, order, comm);
+
+      Matrix<ValueType> nodes = VTK_Nodes_<ValueType>(order);
+      Integer Nnodes = sctl::pow<ElemDim,Integer>(order);
+      SCTL_ASSERT(nodes.Dim(0) == ElemDim);
+      SCTL_ASSERT(nodes.Dim(1) == Nnodes);
+
+      { // Set value
+        Matrix<ValueType> vtk_value;
+        auto M = ValueBasis::SetupEval(nodes);
+        ValueBasis::Eval(vtk_value, elem_value, M);
+        for (Long k = 0; k < NElem; k++) {
+          for (Integer i = 0; i < Nnodes; i++) {
+            for (Integer j = 0; j < dof; j++) {
+              vtu.value.PushBack((VTUData::VTKReal)vtk_value[k*dof+j][i]);
+            }
+          }
+        }
+      }
+    }
+
   private:
     static_assert(CoordBasis::Dim() <= CoordDim(), "Basis dimension can not be greater than COORD_DIM.");
+
+    template <class T> static Matrix<T> VTK_Nodes_(Integer order) {
+      constexpr Integer ElemDim = ElemList::ElemDim();
+      Matrix<T> nodes;
+      if (ElemDim == 2) {
+        Integer Nnodes = order*order;
+        nodes.ReInit(ElemDim, Nnodes);
+        for (Integer i = 0; i < order; i++) {
+          for (Integer j = 0; j < order; j++) {
+            nodes[0][i*order+j] = 0.5 - 0.5 * sctl::cos<T>((2*i+1) * const_pi<T>() / (2*order));
+            nodes[1][i*order+j] = 0.5 - 0.5 * sctl::cos<T>((2*j+1) * const_pi<T>() / (2*order));
+          }
+        }
+      } else {
+        // TODO
+        SCTL_ASSERT(false);
+      }
+      return nodes;
+    }
+
     Vector<CoordBasis> X_;
     Long Nelem_;
 
@@ -567,7 +662,7 @@ template <class Real> class Quadrature {
         U = 0;
       }
       for (Long j = 0; j < Nelem; j++) {
-        const Matrix<Real> M_(KDIM0_ * DensityBasis::Size(), KDIM1_ * Ntrg, (Iterator<Real>)M[j * KDIM0_ * DensityBasis::Size()], false);
+        const Matrix<const Real> M_(KDIM0_ * DensityBasis::Size(), KDIM1_ * Ntrg, M[j * KDIM0_ * DensityBasis::Size()], false);
         Matrix<Real> U_(dof, KDIM1_ * Ntrg, U[j*dof*KDIM1_], false);
         Matrix<Real> F_(dof, KDIM0_ * DensityBasis::Size());
         for (Long i = 0; i < dof; i++) {
@@ -817,7 +912,7 @@ template <class Real> class Quadrature {
         cnt[N-1] = PtSrc.Dim() - dsp[N-1];
         tree.AddData("PtSrc", PtSrc, cnt);
       }
-      tree.template Broadcast<PtData>("PtSrc");
+      tree.Broadcast("PtSrc");
 
       { // Build pair_lst
         Vector<Long> cnt;
@@ -846,8 +941,8 @@ template <class Real> class Quadrature {
 
               Vector<std::set<Long>> near_elem(Trg.Dim());
               for (Integer d = 0; d <= d0; d++) {
-                trg_mid.NbrList(nbr_mid_tmp, d, period_length>0);
-                for (const auto& src_mid : nbr_mid_tmp) if (src_mid.Depth() >= 0) { // Set Src
+                trg_mid.NbrList(nbr_mid_tmp, d, period_length>0 ? all_periodic(CoordDim) : Periodicity::NONE);
+                for (const auto& src_mid : nbr_mid_tmp) if (src_mid.Depth() != Morton<CoordDim>::INVALID_DEPTH) { // Set Src
                   PtData m0, m1;
                   m0.mid = src_mid;
                   m1.mid = (d==d0 ? src_mid.Next() : src_mid.Ancestor(d+1));
@@ -1119,7 +1214,7 @@ template <class Real> class Quadrature {
             CoordBasis::Eval(X_, Vector<CoordBasis>(CoordDim,(Iterator<CoordBasis>)X.begin()+src_idx*CoordDim,false),eval_op);
             CoordBasis::Eval(dX_, Vector<CoordBasis>(CoordDim*ElemDim,dX.begin()+src_idx*CoordDim*ElemDim,false),eval_op);
 
-            const Tensor<Real,false,CoordDim,1> x0((Iterator<Real>)Xt_);
+            const Tensor<const Real,false,CoordDim,1> x0(Xt_);
             const Tensor<Real,false,CoordDim,1> x(X_.begin());
             const Tensor<Real,false,CoordDim,ElemDim> x_u(dX_.begin());
             auto inv = [](const Tensor<Real,true,2,2>& M) {
@@ -1270,7 +1365,7 @@ template <class Real> class Quadrature {
       Vector<Real> U_loc(Ninterac*dof*KDIM1_);
       for (Long j = 0; j < Ninterac; j++) {
         const Long src_idx = pair_lst[j].first - elem_rank_offset;
-        const Matrix<Real> M_(KDIM0_ * DensityBasis::Size(), KDIM1_, (Iterator<Real>)M[j * KDIM0_ * DensityBasis::Size()], false);
+        const Matrix<const Real> M_(KDIM0_ * DensityBasis::Size(), KDIM1_, M[j * KDIM0_ * DensityBasis::Size()], false);
         Matrix<Real> U_(dof, KDIM1_, U_loc.begin() + j*dof*KDIM1_, false);
         Matrix<Real> F_(dof, KDIM0_ * DensityBasis::Size());
         for (Long i = 0; i < dof; i++) {
@@ -1682,12 +1777,12 @@ template <class Real> class Quadrature {
         }
         { // Write VTK output
           VTUData vtu;
-          vtu.AddElems(elements_src, err, ORDER);
+          elements_src.WriteToVTU(vtu, err, ORDER);
           vtu.WriteVTK("err", comm);
         }
         { // Write VTK output
           VTUData vtu;
-          vtu.AddElems(elements_src, U_onsurf, ORDER);
+          elements_src.WriteToVTU(vtu, U_onsurf, ORDER);
           vtu.WriteVTK("U", comm);
         }
       }
@@ -1717,12 +1812,12 @@ template <class Real> class Quadrature {
         }
         { // Write VTK output
           VTUData vtu;
-          vtu.AddElems(elements_trg, err, ORDER);
+          elements_trg.WriteToVTU(vtu, err, ORDER);
           vtu.WriteVTK("err", comm);
         }
         { // Write VTK output
           VTUData vtu;
-          vtu.AddElems(elements_trg, U_offsurf, ORDER);
+          elements_trg.WriteToVTU(vtu, U_offsurf, ORDER);
           vtu.WriteVTK("U", comm);
         }
       }

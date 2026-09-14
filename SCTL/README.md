@@ -9,7 +9,7 @@
 
 ## Requirements
 
-The only requirement to use SCTL is a working C++11 compliant compiler with OpenMP 4.0 support. It has been tested with GCC-9 and newer.
+The only requirement to use SCTL is a working C++17 compliant compiler with OpenMP 4.0 support. It has been tested with GCC-9 and newer.
 
 ## Getting Started
 
@@ -36,7 +36,7 @@ The following libraries can be optionally used when available. If not available,
 - **libmvec**: Enable by defining `SCTL_HAVE_LIBMVEC`.
 - **Intel SVML**: Enable by defining `SCTL_HAVE_SVML`.
 - **MPI**: Enable by defining `SCTL_HAVE_MPI` (see [Comm](include/sctl/comm.hpp)).
-- [FFTW](https://www.fftw.org): Enable double precision by defining `SCTL_HAVE_FFTW`, single precision by defining `SCTL_HAVE_FFTWF`, or long double precision by defining `SCTL_HAVE_FFTWL` (see [FFT](include/sctl/fft_wrapper_hpp)).
+- [FFTW](https://www.fftw.org): Enable double precision by defining `SCTL_HAVE_FFTW`, single precision by defining `SCTL_HAVE_FFTWF`, or long double precision by defining `SCTL_HAVE_FFTWL` (see [FFT](include/sctl/fft_wrapper.hpp)).
 - [PVFMM](http://pvfmm.org): Enable by defining `SCTL_HAVE_PVFMM` (requires MPI, see [ParticleFMM](include/sctl/fmm-wrapper.hpp)).
 
 To enable support for any of these libraries, define the corresponding flag during compilation. For example, to enable MPI support, use `-DSCTL_HAVE_MPI`.
@@ -47,9 +47,9 @@ The following compiler flags can be used to enable or disable specific features 
 
 - `-DSCTL_MEMDEBUG`: Enable memory debugging ([iterator.hpp](include/sctl/iterator.hpp), [static-array.hpp](include/sctl/static-array.hpp)).
 - `-DSCTL_GLOBAL_MEM_BUFF=<size in MB>`: Use a [global memory buffer](include/sctl/mem_mgr.hpp) for allocations.
-- `-DSCTL_PROFILE`: Enable [profiling](include/sctl/profile.hpp).
-- `-DSCTL_VERBOSE=<level>`: Enable verbose [profiling](include/sctl/profile.hpp) output.
-- `-DSCTL_SIG_HANDLER`: Enable [stack trace](include/sctl/stacktrace.h).
+- `-DSCTL_PROFILE=<level>`: Enable [profiling](include/sctl/profile.hpp).
+- `-DSCTL_VERBOSE`: Enable verbose [profiling](include/sctl/profile.hpp) output.
+- `-DSCTL_SIG_HANDLER`: Enable [stack trace](include/sctl/stacktrace.h). On Linux with glibc < 2.34, link with `-ldl` (newer glibc has it merged into libc).
 - `-DSCTL_QUAD_T`: Enable support for [quad-precision type](include/sctl/math_utils.hpp).
 
 ## Features and Capabilities
@@ -72,6 +72,7 @@ The following list outlines the primary features and capabilities provided by th
   - [ChebQuadRule, LegQuadRule](include/sctl/quadrule.hpp): Clenshaw-Curtis and Gauss-Legendre quadrature rules.
   - [InterpQuadRule](include/sctl/quadrule.hpp): Generating special quadrature rules.
   - [Tree, PtTree](include/sctl/tree.hpp), [Morton](include/sctl/morton.hpp): Morton order based N-dimensional parallel tree structure.
+  - [SortScatter](include/sctl/sort-scatter.hpp): keys sorted into a rank-partitioned order, kept together with the permutation to and from the caller's order; the trees move particle data with it.
 
 - **Spectral Methods**:
   Methods for spectral representations and transformations.
@@ -101,8 +102,14 @@ The following list outlines the primary features and capabilities provided by th
   - [QuadReal, basic math functions](include/sctl/math_utils.hpp): Quad-precision type and essential mathematical functions.
   - [Iterator, ConstIterator](include/sctl/iterator.hpp), [StaticArray](include/sctl/static-array.hpp): Iterator and static array utilities.
   - [MemoryManager](include/sctl/mem_mgr.hpp): Aligned memory allocation and deallocation.
+  - [ScratchBuf, ScratchPool](include/sctl/scratch_pool.hpp): Per-thread stack allocator for short-lived buffers in hot loops.
   - [Stacktrace utility](include/sctl/stacktrace.h): Prints stack traces for debugging.
   - [GEMM, SVD (unoptimized)](include/sctl/mat_utils.hpp): Provides basic implementations of GEMM and SVD operations.
+
+- **Experimental**:
+  Components whose interfaces may still change.
+
+  - [GPUTree, PtTree](include/sctl/experimental/gpu-tree.hpp): The `Tree`/`PtTree` interface on a thrust backend, OpenMP host or CUDA device, with CUDA-aware MPI (`make gpu`).
 
 - **Legacy (Unmaintained)**:
   Older functionalities that are no longer actively maintained.

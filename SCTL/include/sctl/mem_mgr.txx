@@ -1,8 +1,11 @@
 #ifndef _SCTL_MEM_MGR_TXX_
 #define _SCTL_MEM_MGR_TXX_
 
-#include <omp.h>                // for omp_get_wtime
 #include <stdlib.h>             // for free, malloc
+#ifdef __linux__
+#include <sys/mman.h>           // for madvise
+#endif
+#include <atomic>               // for atomic
 #include <algorithm>            // for max
 #include <cassert>              // for assert
 #include <cstdint>              // for uintptr_t, uint16_t
@@ -26,6 +29,27 @@
 
 namespace sctl {
 
+inline void advise_huge_pages(void* ptr, Long bytes) {
+#ifdef __linux__
+  constexpr uintptr_t pg = 4096;
+  if (bytes < (2L << 20)) return;
+  const uintptr_t beg = ((uintptr_t)ptr + pg - 1) & ~(pg - 1);
+  const uintptr_t end = ((uintptr_t)ptr + (uintptr_t)bytes) & ~(pg - 1);
+  if (end > beg) madvise((void*)beg, end - beg, MADV_HUGEPAGE);
+#else
+  SCTL_UNUSED(ptr);
+  SCTL_UNUSED(bytes);
+#endif
+}
+
+// Minimum element count for aligned_new/aligned_delete to parallelize the
+// per-element constructor/destructor loop. Below this, run serially: a 1-trip
+// `#pragma omp parallel for` costs ~0.23us (1 thread) / ~14us (64 threads) of
+// pure GOMP setup, which dominates single-object (n_elem==1) allocations.
+#ifndef SCTL_OMP_ALLOC_MIN
+#define SCTL_OMP_ALLOC_MIN 1024
+#endif
+
 inline MemoryManager::MemoryManager(Long N) {
   buff_size = N;
   {  // Allocate buff
@@ -33,6 +57,7 @@ inline MemoryManager::MemoryManager(Long N) {
     Long alignment = SCTL_MEM_ALIGN - 1;
     char* base_ptr = (char*)::malloc(N + 2 + alignment);
     SCTL_ASSERT_MSG(base_ptr, "memory allocation failed.");
+    advise_huge_pages(base_ptr, N + 2 + alignment);
     buff = (char*)((uintptr_t)(base_ptr + 2 + alignment) & ~(uintptr_t)alignment);
     ((uint16_t*)buff)[-1] = (uint16_t)(buff - base_ptr);
   }
@@ -111,14 +136,15 @@ inline Iterator<char> MemoryManager::malloc(const Long n_elem, const Long type_s
   size = (uintptr_t)(size + alignment) & ~(uintptr_t)alignment;
   char* base = nullptr;
 
-  static Long alloc_ctr = 0;
-  Long head_alloc_ctr, n_indx;
+  static std::atomic<Long> alloc_ctr{0};
+  Long head_alloc_ctr, n_indx = 0;
+  if (!buff_size) head_alloc_ctr = ++alloc_ctr; // no managed buffer -> skip the global lock
+  else
   #pragma omp critical(SCTL_MEM_MGR_CRIT)
   {
   //mutex_lock.lock();
   //omp_set_lock(&omp_lock);
-  alloc_ctr++;
-  head_alloc_ctr = alloc_ctr;
+  head_alloc_ctr = ++alloc_ctr; // single atomic RMW: unique even if a no-buffer alloc races on alloc_ctr
   std::multimap<Long, Long>::iterator it = free_map.lower_bound(size);
   n_indx = (it != free_map.end() ? it->second : 0);
   if (n_indx) {  // Allocate from buff
@@ -157,6 +183,7 @@ inline Iterator<char> MemoryManager::malloc(const Long n_elem, const Long type_s
   if (!base) {             // Use system malloc
     char* p = (char*)::malloc(size + 2 + alignment + end_padding);
     SCTL_ASSERT_MSG(p, "memory allocation failed.");
+    advise_huge_pages(p, size + 2 + alignment + end_padding);
 #ifdef SCTL_MEMDEBUG
     #pragma omp critical(SCTL_MEM_MGR_CRIT)
     {  // system_malloc.insert(p)
@@ -222,7 +249,8 @@ inline void MemoryManager::free(Iterator<char> p) const {
   static uintptr_t header_size = (uintptr_t)(sizeof(MemHead) + alignment) & ~(uintptr_t)alignment;
   SCTL_UNUSED(header_size);
 
-  MemHead& mem_head = GetMemHead(&p[0]);
+  char* user_ptr = &p[0];
+  MemHead& mem_head = GetMemHead(user_ptr);
   Long n_indx = mem_head.n_indx;
   Long n_elem = mem_head.n_elem;
   Long type_size = mem_head.type_size;
@@ -362,10 +390,10 @@ inline void MemoryManager::test() {
     for (Integer j = 0; j < 3; j++) {
       tmp = (Iterator<double>)memgr.malloc(M * sizeof(double));
       SCTL_ASSERT(tmp != NullIterator<double>());
-      tt = omp_get_wtime();
+      tt = SCTL_GET_WTIME();
 #pragma omp parallel for
       for (Long i = 0; i < M; i += 64) tmp[i] = (double)i;
-      tt = omp_get_wtime() - tt;
+      tt = SCTL_GET_WTIME() - tt;
       std::cout << tt << ' ';
       memgr.free((Iterator<char>)tmp);
     }
@@ -379,10 +407,10 @@ inline void MemoryManager::test() {
     for (Integer j = 0; j < 3; j++) {
       tmp = (double*)::malloc(M * sizeof(double));
       SCTL_ASSERT(tmp != nullptr);
-      tt = omp_get_wtime();
+      tt = SCTL_GET_WTIME();
 #pragma omp parallel for
       for (Long i = 0; i < M; i += 64) tmp[i] = (double)i;
-      tt = omp_get_wtime() - tt;
+      tt = SCTL_GET_WTIME() - tt;
       std::cout << tt << ' ';
       ::free(tmp);
     }
@@ -446,19 +474,19 @@ template <class ValueType> inline Iterator<ValueType> aligned_new(Long n_elem, c
   Iterator<ValueType> A = (Iterator<ValueType>)mem_mgr->malloc(n_elem, sizeof(ValueType), typeid(ValueType).hash_code());
   SCTL_ASSERT_MSG(A != NullIterator<ValueType>(), "memory allocation failed.");
 
-  if (!std::is_trivial<ValueType>::value) {  // Call constructors
-                                          // printf("%s\n", __PRETTY_FUNCTION__);
+  if constexpr (!std::is_trivial<ValueType>::value) {  // Call constructors
+    // printf("%s\n", __PRETTY_FUNCTION__);
+    if (n_elem > SCTL_OMP_ALLOC_MIN) {
 #pragma omp parallel for schedule(static)
-    for (Long i = 0; i < n_elem; i++) {
-      ValueType* Ai = new (&A[i]) ValueType();
-      assert(Ai == (&A[i]));
-      SCTL_UNUSED(Ai);
+      for (Long i = 0; i < n_elem; i++) { ValueType* Ai = new (&A[i]) ValueType(); assert(Ai == (&A[i])); SCTL_UNUSED(Ai); }
+    } else {
+      for (Long i = 0; i < n_elem; i++) { ValueType* Ai = new (&A[i]) ValueType(); assert(Ai == (&A[i])); SCTL_UNUSED(Ai); }
     }
   } else {
 #ifdef SCTL_MEMDEBUG
     static Long random_init_val = 1;
     Iterator<char> A_ = (Iterator<char>)A;
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static)
     for (Long i = 0; i < n_elem * (Long)sizeof(ValueType); i++) {
       A_[i] = random_init_val + i;
     }
@@ -472,16 +500,19 @@ template <class ValueType> inline Iterator<ValueType> aligned_new(Long n_elem, c
 template <class ValueType> inline void aligned_delete(Iterator<ValueType> A, const MemoryManager* mem_mgr) {
   if (A == NullIterator<ValueType>()) return;
 
-  if (!std::is_trivial<ValueType>::value) {  // Call destructors
+  if constexpr (!std::is_trivial<ValueType>::value) {  // Call destructors
     // printf("%s\n", __PRETTY_FUNCTION__);
     MemoryManager::MemHead& mem_head = MemoryManager::GetMemHead((char*)&A[0]);
 #ifdef SCTL_MEMDEBUG
     MemoryManager::CheckMemHead(mem_head);
-    SCTL_ASSERT_MSG(mem_head.type_id==typeid(ValueType).hash_code(), "pointer to aligned_delete has different type than what was used in aligned_new.");
+    SCTL_ASSERT_MSG(mem_head.type_id == typeid(ValueType).hash_code() || (mem_head.n_elem == 1 && std::has_virtual_destructor<ValueType>::value), "pointer to aligned_delete has different type than what was used in aligned_new.");
 #endif
     Long n_elem = mem_head.n_elem;
-    for (Long i = 0; i < n_elem; i++) {
-      A[i].~ValueType();
+    if (n_elem > SCTL_OMP_ALLOC_MIN) {
+      #pragma omp parallel for schedule(static)
+      for (Long i = 0; i < n_elem; i++) { A[i].~ValueType(); }
+    } else {
+      for (Long i = 0; i < n_elem; i++) { A[i].~ValueType(); }
     }
   } else {
 #ifdef SCTL_MEMDEBUG

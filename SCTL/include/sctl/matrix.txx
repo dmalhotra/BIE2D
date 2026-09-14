@@ -3,14 +3,14 @@
 
 #include <ios>                   // for ios
 #include <ostream>               // for ostream
-#include <omp.h>                  // for omp_get_max_threads, omp_get_thread...
 #include <stdio.h>                // for fclose, fopen, fread, fwrite, FILE
 #include <cassert>                // for assert
 #include <cstdint>                // for uint64_t
 #include <iomanip>                // for operator<<, setiosflags, setprecision
 #include <iostream>               // for basic_ostream, char_traits, operator<<
+#include <type_traits>            // for is_const
 
-#include "sctl/common.hpp"        // for Long, SCTL_ASSERT, Integer, SCTL_AS...
+#include "sctl/common.hpp"        // for Long, SCTL_ASSERT, Integer, SCTL_AS, SCTL_GET_(...)...
 #include "sctl/matrix.hpp"        // for Matrix, operator<<
 #include "sctl/iterator.hpp"      // for Iterator, ConstIterator
 #include "sctl/iterator.txx"      // for Iterator::Iterator<ValueType>, Iter...
@@ -18,9 +18,12 @@
 #include "sctl/math_utils.hpp"    // for fabs, sqrt
 #include "sctl/math_utils.txx"    // for machine_eps
 #include "sctl/mem_mgr.txx"       // for aligned_delete, aligned_new
+#include "sctl/ompUtils.txx"      // for omp_par::copy
 #include "sctl/permutation.hpp"   // for Permutation
 #include "sctl/profile.hpp"       // for Profile, ProfileCounter
 #include "sctl/profile.txx"       // for Profile::IncrementCounter
+#include "sctl/scratch_pool.hpp"  // for ScratchBuf
+#include "sctl/scratch_pool.txx"  // for ScratchBuf
 #include "sctl/static-array.hpp"  // for StaticArray
 #include "sctl/static-array.txx"  // for StaticArray::operator[]
 
@@ -44,12 +47,19 @@ template <class ValueType> std::ostream& operator<<(std::ostream& output, const 
 template <class ValueType> void Matrix<ValueType>::Init(Long dim1, Long dim2, Iterator<ValueType> data_, bool own_data_) {
   dim[0] = dim1;
   dim[1] = dim2;
+  capacity = dim[0] * dim[1];
   own_data = own_data_;
   if (own_data) {
-    if (dim[0] * dim[1] > 0) {
-      data_ptr = aligned_new<ValueType>(dim[0] * dim[1]);
+    // Checked before the allocation, not after: storage a Matrix<const T> owns is storage nothing
+    // can ever write, so taking it and then rejecting the copy leaves the elements as the allocator
+    // left them. This also keeps aligned_new<const T> from being instantiated at all.
+    if constexpr (std::is_const<ValueType>::value) {  // Matrix<const T> is a view
+      SCTL_ASSERT_MSG(dim[0] * dim[1] == 0, "Matrix<const T> cannot own storage; use a non-owning view.");
+      data_ptr = NullIterator<ValueType>();
+    } else if (dim[0] * dim[1] > 0) {
+      data_ptr = aligned_new<ValueType>(capacity);
       if (data_ != NullIterator<ValueType>()) {
-        memcopy(data_ptr, data_, dim[0] * dim[1]);
+        omp_par::copy(data_, data_ + dim[0] * dim[1], data_ptr);
       }
     } else
       data_ptr = NullIterator<ValueType>();
@@ -66,7 +76,13 @@ template <class ValueType> Matrix<ValueType>::Matrix(Long dim1, Long dim2, Itera
 }
 
 template <class ValueType> Matrix<ValueType>::Matrix(const Matrix<ValueType>& M) {
+  static_assert(!std::is_const<ValueType>::value, "Matrix<const T> is a view; copy the elements into a Matrix<T> instead");
   Init(M.Dim(0), M.Dim(1), (Iterator<ValueType>)M.begin());
+}
+
+template <class ValueType> Matrix<ValueType>::Matrix(Matrix<ValueType>&& M) noexcept {
+  Init(0, 0);
+  this->Swap(M);
 }
 
 template <class ValueType> Matrix<ValueType>::~Matrix() {
@@ -76,6 +92,7 @@ template <class ValueType> Matrix<ValueType>::~Matrix() {
     }
   }
   data_ptr = NullIterator<ValueType>();
+  capacity = 0;
   dim[0] = 0;
   dim[1] = 0;
 }
@@ -84,26 +101,31 @@ template <class ValueType> void Matrix<ValueType>::Swap(Matrix<ValueType>& M) {
   StaticArray<Long, 2> dim_;
   dim_[0] = dim[0];
   dim_[1] = dim[1];
+  Long capacity_ = capacity;
   Iterator<ValueType> data_ptr_ = data_ptr;
   bool own_data_ = own_data;
 
   dim[0] = M.dim[0];
   dim[1] = M.dim[1];
+  capacity = M.capacity;
   data_ptr = M.data_ptr;
   own_data = M.own_data;
 
   M.dim[0] = dim_[0];
   M.dim[1] = dim_[1];
+  M.capacity = capacity_;
   M.data_ptr = data_ptr_;
   M.own_data = own_data_;
 }
 
 template <class ValueType> void Matrix<ValueType>::ReInit(Long dim1, Long dim2, Iterator<ValueType> data_, bool own_data_) {
-  if (own_data_ && own_data && dim[0] * dim[1] >= dim1 * dim2) {
+  if (own_data_ && own_data && dim1 * dim2 <= capacity) {
     dim[0] = dim1;
     dim[1] = dim2;
-    if (data_ptr != NullIterator<ValueType>() && data_ != NullIterator<ValueType>()) {
-      memcopy(data_ptr, data_, dim[0] * dim[1]);
+    if constexpr (std::is_const<ValueType>::value) {  // Matrix<const T> is a view
+      SCTL_ASSERT_MSG(dim[0] * dim[1] == 0, "Matrix<const T> cannot own storage; use a non-owning view.");
+    } else if (data_ptr != NullIterator<ValueType>() && data_ != NullIterator<ValueType>()) {
+      omp_par::copy(data_, data_ + dim[0] * dim[1], data_ptr);
     }
   } else {
     Matrix<ValueType> tmp(dim1, dim2, data_, own_data_);
@@ -171,7 +193,9 @@ template <class ValueType> template <class Type> void Matrix<ValueType>::Read(co
 }
 
 
-template <class ValueType> Long Matrix<ValueType>::Dim(Long i) const { return dim[i]; }
+template <class ValueType> Long Matrix<ValueType>::Dim(Long i) const noexcept { return dim[i]; }
+
+template <class ValueType> bool Matrix<ValueType>::OwnData() const noexcept { return own_data; }
 
 template <class ValueType> void Matrix<ValueType>::SetZero() {
   if (dim[0] && dim[1]) memset(data_ptr, 0, dim[0] * dim[1]);
@@ -187,19 +211,31 @@ template <class ValueType> ConstIterator<ValueType> Matrix<ValueType>::end() con
 
 // Matrix-Matrix operations
 
-template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator=(const Matrix<ValueType>& M) {
-  if (this != &M) {
-    if (dim[0] * dim[1] < M.dim[0] * M.dim[1]) {
-      ReInit(M.dim[0], M.dim[1]);
-    }
-    dim[0] = M.dim[0];
-    dim[1] = M.dim[1];
-    memcopy(data_ptr, M.data_ptr, dim[0] * dim[1]);
+template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator=(Matrix<ValueType>&& M) noexcept {
+  if (this == &M) return *this;
+  if (own_data && M.own_data) {
+    // Both sides own their buffers — safe to swap; M's destructor will release
+    // our old buffer.
+    this->Swap(M);
+  } else {
+    // At least one side is a non-owning view. Falling back to copy semantics.
+    if (dim[0] != M.dim[0] || dim[1] != M.dim[1]) ReInit(M.dim[0], M.dim[1]);
+    omp_par::copy(M.data_ptr, M.data_ptr + dim[0] * dim[1], data_ptr);
   }
   return *this;
 }
 
-template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator+=(const Matrix<ValueType>& M) {
+template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator=(const Matrix<ValueType>& M) {
+  static_assert(!std::is_const<ValueType>::value, "Matrix<const T> is a view; copy the elements into a Matrix<T> instead");
+  if (this != &M) {
+    if (dim[0] != M.dim[0] || dim[1] != M.dim[1]) ReInit(M.dim[0], M.dim[1]);
+    omp_par::copy(M.data_ptr, M.data_ptr + dim[0] * dim[1], data_ptr);
+  }
+  return *this;
+}
+
+template <class ValueType> template <class VType> Matrix<ValueType>& Matrix<ValueType>::operator+=(const Matrix<VType>& M) {
+  static_assert(std::is_same<typename std::remove_const<VType>::type, value_type>::value, "Matrix operands must have the same element type.");
   SCTL_ASSERT(M.Dim(0) == Dim(0) && M.Dim(1) == Dim(1));
   Profile::IncrementCounter(ProfileCounter::FLOP, dim[0] * dim[1]);
 
@@ -207,7 +243,8 @@ template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator+=(cons
   return *this;
 }
 
-template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator-=(const Matrix<ValueType>& M) {
+template <class ValueType> template <class VType> Matrix<ValueType>& Matrix<ValueType>::operator-=(const Matrix<VType>& M) {
+  static_assert(std::is_same<typename std::remove_const<VType>::type, value_type>::value, "Matrix operands must have the same element type.");
   SCTL_ASSERT(M.Dim(0) == Dim(0) && M.Dim(1) == Dim(1));
   Profile::IncrementCounter(ProfileCounter::FLOP, dim[0] * dim[1]);
 
@@ -215,46 +252,51 @@ template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator-=(cons
   return *this;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator+(const Matrix<ValueType>& M2) const {
+template <class ValueType> template <class VType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator+(const Matrix<VType>& M2) const {
+  static_assert(std::is_same<typename std::remove_const<VType>::type, value_type>::value, "Matrix operands must have the same element type.");
   const Matrix<ValueType>& M1 = *this;
   SCTL_ASSERT(M2.Dim(0) == M1.Dim(0) && M2.Dim(1) == M1.Dim(1));
   Profile::IncrementCounter(ProfileCounter::FLOP, dim[0] * dim[1]);
 
-  Matrix<ValueType> M_r(M1.Dim(0), M1.Dim(1));
+  Matrix<value_type> M_r(M1.Dim(0), M1.Dim(1));
   for (Long i = 0; i < M1.Dim(0) * M1.Dim(1); i++) M_r[0][i] = M1[0][i] + M2[0][i];
   return M_r;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator-(const Matrix<ValueType>& M2) const {
+template <class ValueType> template <class VType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator-(const Matrix<VType>& M2) const {
+  static_assert(std::is_same<typename std::remove_const<VType>::type, value_type>::value, "Matrix operands must have the same element type.");
   const Matrix<ValueType>& M1 = *this;
   SCTL_ASSERT(M2.Dim(0) == M1.Dim(0) && M2.Dim(1) == M1.Dim(1));
   Profile::IncrementCounter(ProfileCounter::FLOP, dim[0] * dim[1]);
 
-  Matrix<ValueType> M_r(M1.Dim(0), M1.Dim(1));
+  Matrix<value_type> M_r(M1.Dim(0), M1.Dim(1));
   for (Long i = 0; i < M1.Dim(0) * M1.Dim(1); i++) M_r[0][i] = M1[0][i] - M2[0][i];
   return M_r;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator*(const Matrix<ValueType>& M) const {
+template <class ValueType> template <class VType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator*(const Matrix<VType>& M) const {
+  static_assert(std::is_same<typename std::remove_const<VType>::type, value_type>::value, "Matrix operands must have the same element type.");
   SCTL_ASSERT(dim[1] == M.dim[0]);
   Profile::IncrementCounter(ProfileCounter::FLOP, 2 * (((Long)dim[0]) * dim[1]) * M.dim[1]);
 
-  Matrix<ValueType> M_r(dim[0], M.dim[1]);
+  Matrix<value_type> M_r(dim[0], M.dim[1]);
   if (M.Dim(0) * M.Dim(1) == 0 || this->Dim(0) * this->Dim(1) == 0) return M_r;
-  mat::gemm<ValueType>('N', 'N', M.dim[1], dim[0], dim[1], 1.0, M.data_ptr, M.dim[1], data_ptr, dim[1], 0.0, M_r.data_ptr, M_r.dim[1]);
+  mat::gemm<value_type>('N', 'N', M.dim[1], dim[0], dim[1], 1.0, M.data_ptr, M.dim[1], data_ptr, dim[1], 0.0, M_r.data_ptr, M_r.dim[1]);
   return M_r;
 }
 
-template <class ValueType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, const Matrix<ValueType>& A, const Matrix<ValueType>& B, ValueType beta) {
+template <class ValueType> template <class AType, class BType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, const Matrix<AType>& A, const Matrix<BType>& B, ValueType beta) {
+  static_assert(std::is_same<typename std::remove_const<AType>::type, value_type>::value, "Matrix operands must have the same element type.");
+  static_assert(std::is_same<typename std::remove_const<BType>::type, value_type>::value, "Matrix operands must have the same element type.");
   SCTL_ASSERT(A.dim[1] == B.dim[0]);
   SCTL_ASSERT(M_r.dim[0] == A.dim[0]);
   SCTL_ASSERT(M_r.dim[1] == B.dim[1]);
   if (A.Dim(0) * A.Dim(1) == 0 || B.Dim(0) * B.Dim(1) == 0) return;
   Profile::IncrementCounter(ProfileCounter::FLOP, 2 * (((Long)A.dim[0]) * A.dim[1]) * B.dim[1]);
-  mat::gemm<ValueType>('N', 'N', B.dim[1], A.dim[0], A.dim[1], 1.0, B.data_ptr, B.dim[1], A.data_ptr, A.dim[1], beta, M_r.data_ptr, M_r.dim[1]);
+  mat::gemm<value_type>('N', 'N', B.dim[1], A.dim[0], A.dim[1], 1.0, B.data_ptr, B.dim[1], A.data_ptr, A.dim[1], beta, M_r.data_ptr, M_r.dim[1]);
 }
 
-template <class ValueType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, const Permutation<ValueType>& P, const Matrix<ValueType>& M, ValueType beta) {
+template <class ValueType> template <class VType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, const Permutation<ValueType>& P, const Matrix<VType>& M, ValueType beta) {
   Long d0 = M.Dim(0);
   Long d1 = M.Dim(1);
 
@@ -280,7 +322,7 @@ template <class ValueType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, 
   }
 }
 
-template <class ValueType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, const Matrix<ValueType>& M, const Permutation<ValueType>& P, ValueType beta) {
+template <class ValueType> template <class VType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, const Matrix<VType>& M, const Permutation<ValueType>& P, ValueType beta) {
   Long d0 = M.Dim(0);
   Long d1 = M.Dim(1);
 
@@ -311,6 +353,7 @@ template <class ValueType> void Matrix<ValueType>::GEMM(Matrix<ValueType>& M_r, 
 // Matrix-Scalar operations
 
 template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator=(ValueType s) {
+  static_assert(!std::is_const<ValueType>::value, "Matrix<const T> is a view; its elements cannot be assigned");
   Long N = dim[0] * dim[1];
   for (Long i = 0; i < N; i++) data_ptr[i] = s;
   return *this;
@@ -344,30 +387,30 @@ template <class ValueType> Matrix<ValueType>& Matrix<ValueType>::operator/=(Valu
   return *this;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator+(ValueType s) const {
+template <class ValueType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator+(ValueType s) const {
   Long N = dim[0] * dim[1];
-  Matrix<ValueType> M_r(dim[0], dim[1]);
+  Matrix<value_type> M_r(dim[0], dim[1]);
   for (Long i = 0; i < N; i++) M_r.data_ptr[i] = data_ptr[i] + s;
   return M_r;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator-(ValueType s) const {
+template <class ValueType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator-(ValueType s) const {
   Long N = dim[0] * dim[1];
-  Matrix<ValueType> M_r(dim[0], dim[1]);
+  Matrix<value_type> M_r(dim[0], dim[1]);
   for (Long i = 0; i < N; i++) M_r.data_ptr[i] = data_ptr[i] - s;
   return M_r;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator*(ValueType s) const {
+template <class ValueType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator*(ValueType s) const {
   Long N = dim[0] * dim[1];
-  Matrix<ValueType> M_r(dim[0], dim[1]);
+  Matrix<value_type> M_r(dim[0], dim[1]);
   for (Long i = 0; i < N; i++) M_r.data_ptr[i] = data_ptr[i] * s;
   return M_r;
 }
 
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::operator/(ValueType s) const {
+template <class ValueType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::operator/(ValueType s) const {
   Long N = dim[0] * dim[1];
-  Matrix<ValueType> M_r(dim[0], dim[1]);
+  Matrix<value_type> M_r(dim[0], dim[1]);
   for (Long i = 0; i < N; i++) M_r.data_ptr[i] = data_ptr[i] / s;
   return M_r;
 }
@@ -408,7 +451,7 @@ template <class ValueType> void Matrix<ValueType>::RowPerm(const Permutation<Val
     for (Long j = 0; j < d1; j++) M_[j] *= s;
   }
 
-  Integer omp_p = omp_get_max_threads();
+  Integer omp_p = SCTL_GET_MAX_THREADS();
 #pragma omp parallel for schedule(static)
   for (Integer tid = 0; tid < omp_p; tid++) {
     Long a = d1 * (tid + 0) / omp_p;
@@ -421,7 +464,6 @@ template <class ValueType> void Matrix<ValueType>::RowPerm(const Permutation<Val
       SCTL_ASSERT_MSG(j < d0, "Matrix::RowPerm(Permutation P) ==> Invalid permutation vector P.");
 
       Iterator<ValueType> Mi = M[i];
-      Iterator<ValueType> Mj = M[j];
       std::swap<Long>(P_.perm[i], P_.perm[j]);
       for (Long k = a; k < b; k++) Mi[k]=tid;
     }
@@ -435,30 +477,30 @@ template <class ValueType> void Matrix<ValueType>::ColPerm(const Permutation<Val
   Long d0 = M.Dim(0);
   Long d1 = M.Dim(1);
 
-  Integer omp_p = omp_get_max_threads();
-  Matrix<ValueType> M_buff(omp_p, d1);
-
   ConstIterator<Long> perm_ = P.perm.begin();
   ConstIterator<ValueType> scal_ = P.scal.begin();
-#pragma omp parallel for schedule(static)
-  for (Long i = 0; i < d0; i++) {
-    Integer pid = omp_get_thread_num();
-    Iterator<ValueType> buff = M_buff[pid];
-    Iterator<ValueType> M_ = M[i];
-    for (Long j = 0; j < d1; j++) buff[j] = M_[j];
-    for (Long j = 0; j < d1; j++) {
-      M_[j] = buff[perm_[j]] * scal_[j];
+#pragma omp parallel
+  {
+    ScratchBuf<ValueType> buff_storage(d1);
+    Iterator<ValueType> buff = buff_storage.begin();
+#pragma omp for schedule(static)
+    for (Long i = 0; i < d0; i++) {
+      Iterator<ValueType> M_ = M[i];
+      for (Long j = 0; j < d1; j++) buff[j] = M_[j];
+      for (Long j = 0; j < d1; j++) {
+        M_[j] = buff[perm_[j]] * scal_[j];
+      }
     }
   }
 }
 
 #define SCTL_B1 128
 #define SCTL_B2 32
-template <class ValueType> Matrix<ValueType> Matrix<ValueType>::Transpose() const {
+template <class ValueType> Matrix<typename Matrix<ValueType>::value_type> Matrix<ValueType>::Transpose() const {
   const Matrix<ValueType>& M = *this;
   Long d0 = M.dim[0];
   Long d1 = M.dim[1];
-  Matrix<ValueType> M_r(d1, d0);
+  Matrix<value_type> M_r(d1, d0);
 
   const Long blk0 = ((d0 + SCTL_B1 - 1) / SCTL_B1);
   const Long blk1 = ((d1 + SCTL_B1 - 1) / SCTL_B1);
@@ -486,10 +528,16 @@ template <class ValueType> Matrix<ValueType> Matrix<ValueType>::Transpose() cons
   return M_r;
 }
 
-template <class ValueType> void Matrix<ValueType>::Transpose(Matrix<ValueType>& M_r, const Matrix<ValueType>& M) {
+template <class ValueType> template <class VType> void Matrix<ValueType>::Transpose(Matrix<ValueType>& M_r, const Matrix<VType>& M) {
   Long d0 = M.dim[0];
   Long d1 = M.dim[1];
   if (M_r.dim[0] != d1 || M_r.dim[1] != d0) M_r.ReInit(d1, d0);
+  if (d0 && d1) {  // Out-of-place transpose: source and destination must not alias.
+    const ValueType* src_begin = &M[0][0],   * src_end = src_begin + d0 * d1;
+    const ValueType* dst_begin = &M_r[0][0], * dst_end = dst_begin + d0 * d1;
+    SCTL_ASSERT_MSG(src_end <= dst_begin || dst_end <= src_begin,
+        "Matrix::Transpose(M_r, M): source and destination memory overlap; use M.Transpose() for a transposed copy.");
+  }
 
   const Long blk0 = ((d0 + SCTL_B1 - 1) / SCTL_B1);
   const Long blk1 = ((d1 + SCTL_B1 - 1) / SCTL_B1);

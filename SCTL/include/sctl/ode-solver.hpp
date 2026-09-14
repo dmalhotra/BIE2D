@@ -67,7 +67,6 @@ template <class Real> class SDC {
      * @param[in] tol_picard the tolerance for stopping Picard iterations
      * @param[out] error_interp an estimate of the truncation error of the solution interpolant
      * @param[out] error_picard the Picard iteration error
-     * @param[out] norm_dudt maximum norm of du/dt
      * @param[out] iter_count number of Picard iterations
      * @param[out] delta_u_substep the value of (u(t)-u0) at each sub-step
      */
@@ -90,8 +89,8 @@ template <class Real> class SDC {
      * @param[in] tol_picard the tolerance for stopping Picard iterations
      * @param[out] error_interp an estimate of the truncation error of the solution interpolant
      * @param[out] error_picard the Picard iteration error
-     * @param[out] norm_dudt maximum norm of du/dt
      * @param[out] iter_count number of Picard iterations on exit (or -1 if terminated)
+     * @param[out] u_substep the solution at each substep
      */
     void operator()(Vector<Real>* u, const Real dt, const Vector<Real>& u0, const Fn1& F, const Real tol_picard = 0, Real* error_interp = nullptr, Real* error_picard = nullptr, Integer* iter_count = nullptr, Matrix<Real>* u_substep = nullptr) const;
 
