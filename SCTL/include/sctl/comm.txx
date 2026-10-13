@@ -2619,7 +2619,7 @@ template <class Type, class Compare> Type Comm::DetermineSplitter(const Vector<T
     ScratchBuf<Type> bnd(rdsp[np-1] + rcnt[np-1]), bnd2(rdsp[np-1] + rcnt[np-1]);
     Allgatherv(sbuf+0, scnt[0], bnd.begin(), rcnt.begin(), rdsp.begin());
     omp_par::merge_sort(bnd.begin(), bnd.end(), comp);
-    const Long B = omp_par::dedup_sorted(bnd.begin(), bnd2.begin(), bnd.Dim(), comp);  // out-of-place: bnd -> bnd2
+    const Long B = omp_par::dedup_sorted(bnd.begin(), bnd2.begin(), bnd.size(), comp);  // out-of-place: bnd -> bnd2
     if (B) gmin = bnd2[0];
 
     ScratchBuf<Long> lr_b(B), gr_b(B); // each boundary's local then exact global rank
@@ -2701,8 +2701,8 @@ template <class Type, class Compare> Type Comm::DetermineSplitter(const Vector<T
   // gr[S+i] = global upper_bound rank of bracket[i*2+0] (end of blo's duplicate run), folded into the same Allreduce.
   const auto global_ranks = [this, ns, &local_ranks, &bracket]
                             (ScratchBuf<Long>& lr, ScratchBuf<Long>& gr, const Vector<Type>& cand, Long S) {
-    SCTL_ASSERT(lr.Dim() >= S+ns);
-    SCTL_ASSERT(gr.Dim() >= S+ns);
+    SCTL_ASSERT(lr.size() >= S+ns);
+    SCTL_ASSERT(gr.size() >= S+ns);
 
     ScratchBuf<Type> blo(ns);
     for (Long i = 0; i < ns; i++) blo[i] = bracket[i*2+0];
@@ -2858,7 +2858,8 @@ template <class Type, class Compare> void Comm::SampleSort(const Vector<Type>& a
   if (!totSize) { SortedElem.ReInit(0); return; }
 
   // local sort
-  ScratchBuf<Type> loc_buf(nloc); Vector<Type> loc(nloc, loc_buf.begin(), false);
+  ScratchBuf<Type> loc_buf(nloc);
+  Vector<Type> loc(loc_buf);
   comm_detail::LocalSort<Type>(arr_.begin(), loc.begin(), nloc, comp);
 
   const Type my_split = DetermineSplitter(loc, totSize, comp);
@@ -2881,7 +2882,8 @@ template <class Type, class Compare> void Comm::SampleSort(const Vector<Type>& a
     comm_detail::LocalSort<Type>(arr_.begin(), SortedElem.begin(), arr_.Dim(), comp);
     return;
   }
-  ScratchBuf<Type> loc_buf(arr_.Dim()); Vector<Type> loc(arr_.Dim(), loc_buf.begin(), false);
+  ScratchBuf<Type> loc_buf(arr_.Dim());
+  Vector<Type> loc(loc_buf);
   comm_detail::LocalSort<Type>(arr_.begin(), loc.begin(), arr_.Dim(), comp);
   DistributeAndMerge(loc, splitter, SortedElem, comp);
 #else

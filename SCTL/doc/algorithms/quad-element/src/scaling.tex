@@ -1,0 +1,24 @@
+\documentclass[11pt,border=2pt]{standalone}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{calc,arrows,positioning,fit,backgrounds,decorations.pathreplacing,patterns}
+\definecolor{cElem}{RGB}{40,80,140}
+\definecolor{cTrg}{RGB}{190,40,40}
+\definecolor{cCell}{RGB}{225,238,248}
+\definecolor{cAcc}{RGB}{240,200,120}
+\definecolor{cGrey}{RGB}{120,120,120}
+\definecolor{cVec}{RGB}{110,55,150}
+\begin{document}
+\begin{tikzpicture}
+\begin{axis}[width=4.2in,height=5.6cm,xmode=log,log basis x=2,xtick={1,2,4,8,16,32,64,96},xticklabels={1,2,4,8,16,32,64,96},
+             xlabel={threads},ylabel={points/s/core},xmin=0.8,xmax=128,ymin=0,ymax=30000,scaled y ticks=false,
+             legend pos=south west,legend style={font=\scriptsize,draw=none},
+             grid=both,grid style={cGrey!20},tick label style={font=\scriptsize},label style={font=\small}]
+  \addplot[cElem,thick,mark=*,mark size=1.4]        table[x=thr,y=pps] {data/scaling-genoa-laplace.dat}; \addlegendentry{Laplace}
+  \addplot[cTrg,thick,dashed,mark=square*,mark size=1.4] table[x=thr,y=pps] {data/scaling-genoa-stokes.dat}; \addlegendentry{Stokes}
+\end{axis}
+\end{tikzpicture}
+\end{document}

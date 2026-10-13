@@ -5,7 +5,7 @@
 
 namespace sctl {
 
-  template <Integer digits, class Real, Integer N> static Vec<Real,N> approx_log(const Vec<Real,N>& x) { // TODO: vectorize
+  template <Integer digits, class Real, Integer N> static Vec<Real,N> approx_log_or_zero(const Vec<Real,N>& x) { // log(x), and 0 at x = 0; TODO: vectorize
     //#if defined(SCTL_HAVE_SVML) || defined(SCTL_HAVE_LIBMVEC)
     return sctl::select(x==Vec<Real,N>::Zero(), Vec<Real,N>::Zero(), sctl::log(x));
     //#else
@@ -32,7 +32,7 @@ namespace sctl {
     }
     template <Integer digits, class VecType> static void uKerMatrix(VecType (&u)[1][1], const VecType (&r)[2], const VecType (&n)[2], const void* ctx_ptr) {
       const VecType r2 = r[0]*r[0]+r[1]*r[1];
-      u[0][0] = approx_log<digits>(r2);
+      u[0][0] = approx_log_or_zero<digits>(r2);
     }
   };
 

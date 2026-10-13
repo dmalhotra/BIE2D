@@ -12,18 +12,13 @@ endif
 
 OS = $(shell uname -s)
 ifeq "$(OS)" "Darwin"
-	CXXFLAGS += -g -rdynamic -Wl,-no_pie # for stack trace (on Mac)
+	CXXFLAGS += -g -rdynamic # for stack trace
 else
 	CXXFLAGS += -gdwarf-4 -g -rdynamic # for stack trace
-	CXXFLAGS += -ldl # dladdr() in stacktrace.h (libc on glibc >=2.34, libdl otherwise)
+	CXXFLAGS += -ldl # dladdr(), for glibc < 2.34
 endif
 
-# GCC `-march=native` on Sapphire Rapids and newer Intel CPUs emits AVX-512-FP16
-# instructions (e.g. `vmovw`) that pre-2.38 binutils' system assembler can't
-# decode. Disable just the FP16 subset; the rest of -march=native is fine. If a
-# newer binutils is available (e.g. `module load binutils/2.43.1`), the user can
-# remove this flag manually. macOS clang doesn't emit avx512fp16 and doesn't
-# recognise the flag on Apple Silicon — skip there.
+# AVX-512-FP16 of -march=native (Sapphire Rapids), which binutils before 2.38 can't assemble
 ifneq "$(OS)" "Darwin"
        CXXFLAGS += -mno-avx512fp16
 endif
@@ -33,7 +28,7 @@ CXXFLAGS += -DSCTL_GLOBAL_MEM_BUFF=0 # Global memory buffer size in MB
 CXXFLAGS += -DSCTL_PROFILE=5 -DSCTL_VERBOSE # Enable profiling
 CXXFLAGS += -DSCTL_SIG_HANDLER # Enable SCTL stack trace
 
-CXXFLAGS += -DSCTL_QUAD_T=__float128 # Enable quadruple precision
+CXXFLAGS += -DSCTL_QUAD_T=__float128 # Enable quadruple precision (x86, or GCC on Apple silicon)
 
 #CXXFLAGS += -DSCTL_MAX_DEPTH=20 # Morton/Tree depth limit
 
@@ -55,12 +50,13 @@ CXXFLAGS += -lfftw3l -DSCTL_HAVE_FFTWL
 #CXXFLAGS += -lmvec -lm -DSCTL_HAVE_LIBMVEC
 #CXXFLAGS += -DSCTL_HAVE_SVML
 
+#CXXFLAGS += -I$(LIBXSMM_DIR)/include -L$(LIBXSMM_DIR)/lib -l:libxsmm.a -lpthread -lrt -ldl -lm -DSCTL_HAVE_LIBXSMM # use LIBXSMM for SmallGEMM
+
 #CXXFLAGS += -I${PETSC_DIR}/include -I${PETSC_DIR}/../include -DSCTL_HAVE_PETSC
 #LDLIBS += -L${PETSC_DIR}/lib -lpetsc
 
 #PVFMM_INC_DIR = ../include
 #CXXFLAGS += -DSCTL_HAVE_PVFMM -I$(PVFMM_INC_DIR)
-
 
 RM = rm -f
 MKDIRS = mkdir -p
@@ -76,6 +72,7 @@ TARGET_BIN = \
        $(BINDIR)/test-boundary_integral \
        $(BINDIR)/test-cheb_utils \
        $(BINDIR)/test-fft-fallback \
+       $(BINDIR)/test-function-table \
        $(BINDIR)/test-generic-kernel \
        $(BINDIR)/test-intrin-wrapper \
        $(BINDIR)/test-iterator \
@@ -103,9 +100,10 @@ TARGET_BIN = \
        $(BINDIR)/test-sph-harm \
        $(BINDIR)/test-tensor \
        $(BINDIR)/test-vec \
-       $(BINDIR)/test-quad-elem \
        $(BINDIR)/test-scratch-pool \
-       $(BINDIR)/test-scratch-pool-perf
+       $(BINDIR)/test-scratch-pool-perf \
+       $(BINDIR)/test-small-gemm \
+	   $(BINDIR)/test-quad-elem
 
 .PHONY: all gpu test clean
 
@@ -118,11 +116,20 @@ ifeq "$(OS)" "Darwin"
 	/usr/bin/dsymutil $@ -o $@.dSYM
 endif
 
+# link-only flags of CXXFLAGS, left out of compiles (clang warns of them)
+LINK_ONLY_FLAGS = -l% -L% -Wl,% -rdynamic
+
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	-@$(MKDIRS) $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INCDIR) -c $^ -o $@
+	$(CXX) $(filter-out $(LINK_ONLY_FLAGS),$(CXXFLAGS)) -MMD -MP -I$(INCDIR) -c $< -o $@
 
-# GPU tree: needs CUDA and a CUDA-aware MPI, so `gpu` is separate from `all`.
+# header dependencies (-MMD -MP)
+-include $(wildcard $(OBJDIR)/*.d)
+
+# keep the objects, which the dependency files name
+.SECONDARY: $(patsubst $(BINDIR)/%,$(OBJDIR)/%.o,$(TARGET_BIN))
+
+# GPU tree: needs CUDA and a CUDA-aware MPI (not in `all`)
 NVCC = nvcc -ccbin mpicxx
 NVCCFLAGS = -x cu -std=c++17 -O3 -arch=native -rdc=true --expt-relaxed-constexpr -Xcompiler "-fopenmp" \
             -DSCTL_HAVE_MPI -DSCTL_MAX_DEPTH=20 -DTHRUST_HOST_SYSTEM=THRUST_HOST_SYSTEM_OMP
@@ -149,6 +156,7 @@ test: $(TARGET_BIN)
 	./$(BINDIR)/test-boundary_integral
 	./$(BINDIR)/test-cheb_utils
 	./$(BINDIR)/test-fft-fallback
+	./$(BINDIR)/test-function-table
 	./$(BINDIR)/test-generic-kernel
 	./$(BINDIR)/test-intrin-wrapper
 	./$(BINDIR)/test-iterator
@@ -176,8 +184,9 @@ test: $(TARGET_BIN)
 	./$(BINDIR)/test-sph-harm
 	./$(BINDIR)/test-tensor
 	./$(BINDIR)/test-vec
-	./$(BINDIR)/test-quad-elem
 	./$(BINDIR)/test-scratch-pool
+	./$(BINDIR)/test-small-gemm
+	./$(BINDIR)/test-quad-elem
 
 clean:
 	$(RM) -r $(BINDIR)/* $(OBJDIR)/*

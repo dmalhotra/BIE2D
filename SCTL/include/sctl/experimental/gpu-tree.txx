@@ -52,6 +52,8 @@
 
 namespace gpu_tree {
 
+using sctl::MAX_DEPTH;
+
 namespace detail {
 
 // Execution policy for thrust calls on backend memory, with temporaries drawn from the scratch
@@ -180,7 +182,7 @@ template <class Policy, class Vec, class IVec> void local_sort_by_key(const Poli
 template <class T, template <class...> class DevVec, class Vec>
 Long splitCounts(sctl::Iterator<Long> scnt, sctl::Iterator<Long> rcnt, const Vec& in, Long n,
                  const DeviceScratch<T, DevVec>& keys, const Comm& comm) {
-  const Long np = comm.Size(), nkeys = keys.Dim();
+  const Long np = comm.Size(), nkeys = keys.size();
   SCTL_ASSERT(nkeys == np || nkeys == np - 1);
   {
     sctl::ScratchBuf<Long> pos(np + 1);
@@ -751,7 +753,7 @@ void buildTreeCpuChunked(DevVec<Morton<DIM>>& tree, const DevVec<MortonCode<DIM>
     const Integer tid = SCTL_GET_THREAD_NUM();
     sctl::ScratchBuf<NodeMIDT> buf(max_emits);  // NUMA-local: first-touched on this thread's node
     sctl::Vector<NodeMIDT> spill;
-    HostSink<NodeMIDT> sink{&buf, &spill, buf.Dim(), std::max<Long>(max_emits / 4, 1024)};
+    HostSink<NodeMIDT> sink{&buf, &spill, buf.size(), std::max<Long>(max_emits / 4, 1024)};
     const ChunkedWalkFunctor<DIM, WalkMode::Write, HostSink<NodeMIDT>> fw{
         thrust::raw_pointer_cast(pt_mid.data()) + base, N, M, nt, &zero_offsets[0], &buf[0], start_bnd, end_bnd, &sink};
     const Long count = fw(tid);
@@ -795,7 +797,7 @@ void determineSplitters(sctl::ScratchBuf<Type>& splitters, const DevVec<Type>& p
   const Long np = comm.Size();
 
   const Long ns = np - 1;
-  SCTL_ASSERT(splitters.Dim() == ns);
+  SCTL_ASSERT(splitters.size() == ns);
   if (!ns) return;
 
   const Long Nl = static_cast<Long>(pt.size());
@@ -846,7 +848,7 @@ void determineSplitters(sctl::ScratchBuf<Type>& splitters, const DevVec<Type>& p
     sctl::ScratchBuf<Type> bnd(rdsp[np-1] + rcnt[np-1]), bnd2(rdsp[np-1] + rcnt[np-1]);
     comm.Allgatherv(sbuf+0, scnt[0], bnd.begin(), rcnt.begin(), rdsp.begin());
     sctl::omp_par::merge_sort(bnd.begin(), bnd.end());
-    const Long B = sctl::omp_par::dedup_sorted(bnd.begin(), bnd2.begin(), bnd.Dim());
+    const Long B = sctl::omp_par::dedup_sorted(bnd.begin(), bnd2.begin(), bnd.size());
 
     sctl::ScratchBuf<Long> lr_b(B), gr_b(B); // each boundary's local then exact global rank
     local_ranks(lr_b.begin(), bnd2.begin(), B);
@@ -927,7 +929,7 @@ void determineSplitters(sctl::ScratchBuf<Type>& splitters, const DevVec<Type>& p
       cand_raw[S++] = bracket[i*2+1];
     }
 
-    SCTL_ASSERT(cand.Dim() >= S);
+    SCTL_ASSERT(cand.size() >= S);
     sctl::omp_par::merge_sort(cand_raw.begin(), cand_raw.begin() + S);
     return sctl::omp_par::dedup_sorted(cand_raw.begin(), cand.begin(), S);
   };
@@ -936,8 +938,8 @@ void determineSplitters(sctl::ScratchBuf<Type>& splitters, const DevVec<Type>& p
   // gr[S+i] = global upper_bound rank of bracket[i*2+0] (end of blo's duplicate run), folded into the same Allreduce.
   const auto global_ranks = [&comm,ns,&local_ranks,&bracket]
                             (sctl::ScratchBuf<Long>& lr, sctl::ScratchBuf<Long>& gr, const sctl::ScratchBuf<Type>& cand, Long S) {
-    SCTL_ASSERT(lr.Dim() >= S+ns);
-    SCTL_ASSERT(gr.Dim() >= S+ns);
+    SCTL_ASSERT(lr.size() >= S+ns);
+    SCTL_ASSERT(gr.size() >= S+ns);
 
     sctl::ScratchBuf<Type> blo(ns);
     for (Long i = 0; i < ns; i++) blo[i] = bracket[i*2+0];
@@ -1625,7 +1627,7 @@ template <Integer DIM> struct NbrPropagateFunctor {
 // smallest per-rank count. Concatenated over ranks, the output matches the single-rank build.
 
 template <class Real, Integer DIM, template <class...> class DevVec>
-void GPUTree<Real, DIM, DevVec>::buildTreeDist(DevVec<Morton<DIM>>& tree, const DevVec<Real>& coord, Long M, const Comm& comm, bool balance21, sctl::Periodicity periodicity, Integer halo_size, Long* owned_range, Morton<DIM>* partition, DevVec<NodeAttr>* node_attr, NodeLists<DevVec>* node_lists, DevVec<Morton<DIM>>* user_mid, sctl::Vector<Long>* user_cnt) {
+void GPUTree<Real, DIM, DevVec>::buildTreeDist(DevVec<Morton<DIM>>& tree, DataView<const Real, DevVec> coord, Long M, const Comm& comm, bool balance21, sctl::Periodicity periodicity, Integer halo_size, Long* owned_range, Morton<DIM>* partition, DevVec<NodeAttr>* node_attr, NodeLists<DevVec>* node_lists, DevVec<Morton<DIM>>* user_mid, sctl::Vector<Long>* user_cnt) {
 
   using MortonT = MortonCode<DIM>;
   const auto pol = detail::scratch_policy<DevVec, MortonT>();
@@ -1807,6 +1809,12 @@ void GPUTree<Real, DIM, DevVec>::buildTreeDist(DevVec<Morton<DIM>>& tree, const 
 // bookkeeping around it, mirroring sctl::Tree.
 
 template <class Real, Integer DIM, template <class...> class DevVec>
+void GPUTree<Real, DIM, DevVec>::GetOwnedRange(Long& begin, Long& end) const {
+  begin = owned_begin_;
+  end = owned_end_;
+}
+
+template <class Real, Integer DIM, template <class...> class DevVec>
 GPUTree<Real, DIM, DevVec>::GPUTree(const Comm& comm) : comm_(comm) {
   // The coarsest uniform tree with at least one leaf per rank, as sctl::Tree builds it: one point
   // per cell of an n0^DIM grid, dealt out evenly, refined to one point per leaf. Every rank then
@@ -1825,13 +1833,13 @@ GPUTree<Real, DIM, DevVec>::GPUTree(const Comm& comm) : comm_(comm) {
       idx /= n0;
     }
   }
-  DevVec<Real> coord(h.Dim());
+  DevVec<Real> coord(h.size());
   thrust::copy(h.begin(), h.end(), coord.begin());
   UpdateRefinement(coord);
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec>
-void GPUTree<Real, DIM, DevVec>::UpdateRefinement(const DevVec<Real>& coord, Long M, bool balance21, sctl::Periodicity periodicity, Integer halo_size) {
+void GPUTree<Real, DIM, DevVec>::UpdateRefinement(DataView<const Real, DevVec> coord, Long M, bool balance21, sctl::Periodicity periodicity, Integer halo_size) {
   const Long np = comm_.Size(), rank = comm_.Rank();
   const auto pol = detail::scratch_policy<DevVec, Morton<DIM>>();
 
@@ -1940,7 +1948,6 @@ void GPUTree<Real, DIM, DevVec>::AddData(const std::string& name, Long dof, cons
 
 template <class Real, Integer DIM, template <class...> class DevVec>
 void GPUTree<Real, DIM, DevVec>::addData_(const std::string& name, Long bytes, const sctl::Vector<Long>& cnt) {
-  SCTL_ASSERT_MSG(node_data_.find(name) == node_data_.end(), "GPUTree::AddData: name already present.");
   SCTL_ASSERT_MSG(cnt.Dim() == (Long)node_mid_.size(), "GPUTree::AddData: one count per tree node.");
   node_data_[name].resize(bytes);
   node_cnt_[name] = cnt;
@@ -2398,8 +2405,7 @@ void PtTree<Real, DIM, DevVec, BaseTree>::nodeCounts(const std::string& name, sc
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
-void PtTree<Real, DIM, DevVec, BaseTree>::AddParticles(const std::string& name, const DevVec<Real>& coord) {
-  SCTL_ASSERT_MSG(groups_.find(name) == groups_.end(), "PtTree::AddParticles: name already present.");
+void PtTree<Real, DIM, DevVec, BaseTree>::AddParticles(const std::string& name, DataView<const Real, DevVec> coord) {
   const detail::StageTimer<DevVec> prof{this->GetComm()};
   prof.tic("PtTree::AddParticles", 6);
   const auto pol = detail::scratch_policy<DevVec, MortonCode<DIM>>();
@@ -2408,16 +2414,23 @@ void PtTree<Real, DIM, DevVec, BaseTree>::AddParticles(const std::string& name, 
 
   // The key is the bare MortonCode, not the Morton: every particle sits at MAX_DEPTH, so the depth
   // would only double the key and the exchange volume (NodeToCodeFunctor: why codes alone order them).
-  DevVec<MortonCode<DIM>> key(Nloc);
+  DeviceScratch<MortonCode<DIM>, DevVec> key(Nloc);
   thrust::transform(pol, thrust::counting_iterator<Long>(0), thrust::counting_iterator<Long>(Nloc), key.begin(),
                     detail::MakeMortonFunctor<Real, DIM>{thrust::raw_pointer_cast(coord.data())});
-  groups_.try_emplace(name, this->GetComm()).first->second.Init(std::move(key), partition_codes_);
+  groups_.try_emplace(name, this->GetComm()).first->second.Init(DataView<const MortonCode<DIM>, DevVec>{thrust::raw_pointer_cast(key.data()), Nloc}, &partition_codes_[this->GetComm().Rank()]);
+  for (auto& kv : pt_data_) {  // an existing group's data sets no longer match its particles: emptied, storage kept
+    if (kv.second.particle_name == name && kv.first != name) {
+      this->NodeData_(kv.first).resize(0);
+      this->NodeCnt_(kv.first).SetZero();
+      kv.second.dof = 0;
+    }
+  }
   AddParticleData(name, name, coord);
   prof.toc();
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
-void PtTree<Real, DIM, DevVec, BaseTree>::AddParticleData(const std::string& data_name, const std::string& particle_name, const DevVec<Real>& data) {
+void PtTree<Real, DIM, DevVec, BaseTree>::AddParticleData(const std::string& data_name, const std::string& particle_name, DataView<const Real, DevVec> data) {
   const auto it = groups_.find(particle_name);
   SCTL_ASSERT_MSG(it != groups_.end(), "PtTree::AddParticleData: unknown particle group.");
   const Long dof = detail::globalDof((Long)data.size(), it->second.LocalCount(), this->GetComm());
@@ -2429,63 +2442,89 @@ void PtTree<Real, DIM, DevVec, BaseTree>::AddParticleData(const std::string& dat
   this->GetOwnedRange(owned0, owned1);
   const Long begin = sctl::omp_par::reduce(this->NodeCnt_(data_name).begin(), owned0) * dof;
   // the forward scatter reads the caller's array and writes the stored buffer, so neither end is copied
-  it->second.ScatterForward((const Real*)thrust::raw_pointer_cast(data.data()), (Real*)thrust::raw_pointer_cast(this->NodeData_(data_name).data()) + begin, dof);
+  it->second.ScatterForward((Real*)thrust::raw_pointer_cast(this->NodeData_(data_name).data()) + begin, (const Real*)thrust::raw_pointer_cast(data.data()), dof);
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
 void PtTree<Real, DIM, DevVec, BaseTree>::AddParticleData(const std::string& data_name, const std::string& particle_name, Long dof) {
   SCTL_ASSERT_MSG(groups_.find(particle_name) != groups_.end(), "PtTree::AddParticleData: unknown particle group.");
-  SCTL_ASSERT_MSG(data_pt_name_.find(data_name) == data_pt_name_.end(), "PtTree::AddParticleData: data name already present.");
   if (data_name == particle_name) {  // the group's own coordinates: count its particles per node
     sctl::ScratchBuf<Long> cnt_buf((Long)this->GetNodeMID().size());  // AddData copies the counts out
-    sctl::Vector<Long> cnt(cnt_buf.Dim(), cnt_buf.begin(), false);
+    sctl::Vector<Long> cnt(cnt_buf.size(), cnt_buf.begin(), false);
     nodeCounts(particle_name, cnt);
     this->template AddData<Real>(data_name, dof, cnt);
   } else {  // the group's counts already exist, ghost slots and all, so the layouts stay in step
     this->template AddData<Real>(data_name, dof, this->NodeCnt_(particle_name));
   }
   this->data_moved_by_derived_.insert(data_name);
-  data_pt_name_[data_name] = particle_name;
+  pt_data_[data_name] = PtData{particle_name, dof};
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
-void PtTree<Real, DIM, DevVec, BaseTree>::GetParticleData(DevVec<Real>& data, const std::string& data_name) const {
-  const auto it = data_pt_name_.find(data_name);
-  SCTL_ASSERT_MSG(it != data_pt_name_.end(), "PtTree::GetParticleData: unknown data name.");
-  const auto& g = groups_.find(it->second)->second;
-
-  // the reverse scatter reads the stored buffer and writes the output, so the payload is touched once
-  DataView<const Real, DevVec> raw;
-  sctl::Vector<Long> cnt;
+Long PtTree<Real, DIM, DevVec, BaseTree>::particleDataDof(const std::string& data_name, DataView<const Real, DevVec>& raw, sctl::Vector<Long>& cnt) const {
+  const auto it = pt_data_.find(data_name);
+  SCTL_ASSERT_MSG(it != pt_data_.end(), "PtTree::GetParticleData: unknown data name.");
   this->GetData(raw, cnt, data_name);
-  const Long dof = detail::globalDof(raw.size(), sctl::omp_par::reduce(cnt.begin(), cnt.Dim()), this->GetComm());
+  SCTL_ASSERT(raw.size() == sctl::omp_par::reduce(cnt.begin(), cnt.Dim()) * it->second.dof);
+  return it->second.dof;
+}
 
+template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
+void PtTree<Real, DIM, DevVec, BaseTree>::scatterParticleData(const std::string& data_name, DataView<const Real, DevVec> raw, const sctl::Vector<Long>& cnt, Long dof, Real* out) const {
+  if (dof == 0) return;  // an emptied set: nothing to scatter
+  // the reverse scatter reads the stored buffer and writes the output, so the payload is touched once
+  const auto& g = groups_.find(pt_data_.find(data_name)->second.particle_name)->second;
   Long owned0 = 0, owned1 = 0;  // a Broadcast may have filled the ghost slots; the owned items scatter back
   this->GetOwnedRange(owned0, owned1);
   const Long begin = sctl::omp_par::reduce(cnt.begin(), owned0) * dof;
   SCTL_ASSERT_MSG(sctl::omp_par::reduce(cnt.begin() + owned0, owned1 - owned0) == g.SortedCount(),
                   "PtTree::GetParticleData: the owned items do not match the group's sorted keys.");
-  data.resize(g.LocalCount() * dof);
-  g.ScatterReverse(raw.data() + begin, (Real*)thrust::raw_pointer_cast(data.data()), dof);
+  g.ScatterReverse(out, raw.data() + begin, dof);
+}
+
+template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
+void PtTree<Real, DIM, DevVec, BaseTree>::GetParticleData(DevVec<Real>& data, const std::string& data_name) const {
+  DataView<const Real, DevVec> raw;
+  sctl::Vector<Long> cnt;
+  const Long dof = particleDataDof(data_name, raw, cnt);
+  data.resize(groups_.find(pt_data_.find(data_name)->second.particle_name)->second.LocalCount() * dof);
+  scatterParticleData(data_name, raw, cnt, dof, thrust::raw_pointer_cast(data.data()));
+}
+
+template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
+void PtTree<Real, DIM, DevVec, BaseTree>::GetParticleData(DataView<Real, DevVec> data, const std::string& data_name) const {
+  DataView<const Real, DevVec> raw;
+  sctl::Vector<Long> cnt;
+  const Long dof = particleDataDof(data_name, raw, cnt);
+  SCTL_ASSERT_MSG(data.size() == groups_.find(pt_data_.find(data_name)->second.particle_name)->second.LocalCount() * dof, "PtTree::GetParticleData: data must hold dof * Nlocal values.");
+  scatterParticleData(data_name, raw, cnt, dof, data.data());
+}
+
+template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
+Long PtTree<Real, DIM, DevVec, BaseTree>::ParticleDataSize(const std::string& data_name) const {
+  DataView<const Real, DevVec> raw;
+  sctl::Vector<Long> cnt;
+  const Long dof = particleDataDof(data_name, raw, cnt);
+  return groups_.find(pt_data_.find(data_name)->second.particle_name)->second.LocalCount() * dof;
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
 void PtTree<Real, DIM, DevVec, BaseTree>::DeleteParticleData(const std::string& data_name) {
-  const auto it = data_pt_name_.find(data_name);
-  SCTL_ASSERT_MSG(it != data_pt_name_.end(), "PtTree::DeleteParticleData: unknown data name.");
-  const std::string particle_name = it->second;
+  const auto it = pt_data_.find(data_name);
+  SCTL_ASSERT_MSG(it != pt_data_.end(), "PtTree::DeleteParticleData: unknown data name.");
+  const std::string particle_name = it->second.particle_name;
   if (data_name == particle_name) {  // deleting the group takes every data set on it
     std::vector<std::string> lst;
-    for (const auto& kv : data_pt_name_) if (kv.second == particle_name && kv.first != particle_name) lst.push_back(kv.first);
+    for (const auto& kv : pt_data_) if (kv.second.particle_name == particle_name && kv.first != particle_name) lst.push_back(kv.first);
     for (const auto& x : lst) DeleteParticleData(x);
     groups_.erase(particle_name);
   }
   this->DeleteData(data_name);
-  data_pt_name_.erase(data_name);
+  pt_data_.erase(data_name);
 }
 
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
-void PtTree<Real, DIM, DevVec, BaseTree>::UpdateRefinement(const DevVec<Real>& coord, Long M, bool balance21, sctl::Periodicity periodicity, Integer halo_size) {
+void PtTree<Real, DIM, DevVec, BaseTree>::UpdateRefinement(DataView<const Real, DevVec> coord, Long M, bool balance21, sctl::Periodicity periodicity, Integer halo_size) {
   const Comm& comm = this->GetComm();
   const auto pol = detail::scratch_policy<DevVec, char>();
   Long owned0 = 0, owned1 = 0;
@@ -2495,13 +2534,13 @@ void PtTree<Real, DIM, DevVec, BaseTree>::UpdateRefinement(const DevVec<Real>& c
 
   for (auto& kv : groups_) {  // payloads follow their keys' re-cut; per-node counts come from the particles
     const std::string& group = kv.first;
-    kv.second.Repartition(partition_codes_);
+    kv.second.Repartition(&partition_codes_[comm.Rank()]);
     sctl::ScratchBuf<Long> cnt_new_buf((Long)this->GetNodeMID().size());  // copied into each name's counts below
-    sctl::Vector<Long> cnt_new(cnt_new_buf.Dim(), cnt_new_buf.begin(), false);
+    sctl::Vector<Long> cnt_new(cnt_new_buf.size(), cnt_new_buf.begin(), false);
     nodeCounts(group, cnt_new);
 
     std::vector<std::string> names;
-    for (const auto& p : data_pt_name_) if (p.second == group) names.push_back(p.first);
+    for (const auto& p : pt_data_) if (p.second.particle_name == group) names.push_back(p.first);
     for (const auto& name : names) {
       DevVec<char>& raw = this->NodeData_(name);
       sctl::Vector<Long>& cnt = this->NodeCnt_(name);
@@ -2522,9 +2561,9 @@ void PtTree<Real, DIM, DevVec, BaseTree>::UpdateRefinement(const DevVec<Real>& c
 template <class Real, Integer DIM, template <class...> class DevVec, class BaseTree>
 void PtTree<Real, DIM, DevVec, BaseTree>::WriteParticleVTK(std::string fname, std::string data_name, bool show_ghost) const {
   using VTKReal = typename sctl::VTUData::VTKReal;
-  const auto it = data_pt_name_.find(data_name);
-  SCTL_ASSERT_MSG(it != data_pt_name_.end(), "PtTree::WriteParticleVTK: unknown data name.");
-  const std::string& particle_name = it->second;
+  const auto it = pt_data_.find(data_name);
+  SCTL_ASSERT_MSG(it != pt_data_.end(), "PtTree::WriteParticleVTK: unknown data name.");
+  const std::string& particle_name = it->second.particle_name;
 
   sctl::Vector<Long> pt_cnt, val_cnt;
   DataView<const Real, DevVec> pt_d, val_d;
@@ -2538,7 +2577,7 @@ void PtTree<Real, DIM, DevVec, BaseTree>::WriteParticleVTK(std::string fname, st
   sctl::ScratchBuf<typename BaseTree::NodeAttr> attr(Nn);
   detail::deviceToHost(this->GetNodeAttr().data(), Nn, attr.begin());
   const Long npt = sctl::omp_par::reduce(pt_cnt.begin(), pt_cnt.Dim());
-  const Long vdof = (npt ? val.Dim() / npt : 0);
+  const Long vdof = (npt ? val.size() / npt : 0);
 
   sctl::VTUData vtu_data;
   Long pt_idx = 0;

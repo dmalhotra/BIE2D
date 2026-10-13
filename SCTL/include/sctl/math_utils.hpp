@@ -4,10 +4,20 @@
 #include <istream>          // for istream
 #include <ostream>          // for ostream
 #include <cmath>            // for acos, asin, atan, atan2, ceil, cos, exp
+#include <complex>          // for complex
+#include <utility>          // for declval
 
 #include "sctl/common.hpp"  // for Integer, Long, sctl
 
 namespace sctl {
+
+/**
+ * True for std::complex types.
+ *
+ * @tparam T The template type.
+ */
+template <class T> constexpr bool IsComplex = false;
+template <class Real> constexpr bool IsComplex<std::complex<Real>> = true;
 
 /**
  * Returns the number of significant bits in the representation of the template type.
@@ -284,12 +294,13 @@ class QuadReal {
     ~QuadReal() = default;
 
     /**
-     * Constructor with explicit conversion from another type.
+     * Converting constructor from any type that can be cast to the
+     * underlying quadruple-precision type.
      *
      * @tparam ValueType The template type of the value.
      * @param v The value to convert.
      */
-    template <class ValueType> constexpr QuadReal(ValueType v) : val((QuadRealType)v) {}
+    template <class ValueType, class = decltype((QuadRealType)std::declval<ValueType>())> constexpr QuadReal(ValueType v) : val((QuadRealType)v) {}
 
     /**
      * Explicit conversion operator to another type.

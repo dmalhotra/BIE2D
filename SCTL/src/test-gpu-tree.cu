@@ -106,7 +106,7 @@ template <class Real, Integer DIM, template <class...> class DevVec> Long test_v
       owned(st, sb, se);
       const sctl::Vector<NodeT> gmid = to_host(gt.GetNodeMID());
       const auto& smid = st.GetNodeMID();
-      const sctl::Vector<const NodeT> g(ge - gb, gmid.begin() + gb, false), s(se - sb, smid.begin() + sb, false);  // views of the owned slices
+      const sctl::Vector<const NodeT> g(ge - gb, gmid.begin() + gb, false), s(se - sb, smid.begin() + sb, false);  // views of the owned ranges
       bad_set += !equal(gather(g), gather(s));
       if (np == 1) {
         const sctl::Vector<typename GT::NodeAttr> attr = to_host(gt.GetNodeAttr());
@@ -185,6 +185,22 @@ template <class Real, Integer DIM, template <class...> class DevVec> Long test_v
       }
       gt.AddData("f", DevVec<Real>(gv.begin(), gv.end()), gc);
       st.AddData("f", sv, sc);
+      { // the same name again: the values go into the storage the set has
+        gpu_tree::DataView<const Real, DevVec> g0, g1;
+        sctl::Vector<Real> s0, s1;
+        sctl::Vector<Long> c;
+        gt.GetData(g0, c, "f");
+        st.GetData(s0, c, "f");
+        gt.AddData("f", DevVec<Real>(gv.begin(), gv.end()), gc);
+        st.AddData("f", sv, sc);
+        gt.GetData(g1, c, "f");
+        st.GetData(s1, c, "f");
+        Long moved = (g0.ptr != g1.ptr) + (g0.size() != g1.size()) + (s0.Dim() != s1.Dim());
+#ifndef SCTL_MEMDEBUG  // Vector::ReInit reallocates in that mode even when the size fits
+        moved += (s0.begin() != s1.begin());
+#endif
+        check("adding node data again keeps its storage", moved);
+      }
     }
     gt.UpdateRefinement(yd, 40, true, sctl::Periodicity::NONE, 0);
     st.UpdateRefinement(y, 40, true, sctl::Periodicity::NONE, 0);
@@ -198,7 +214,7 @@ template <class Real, Integer DIM, template <class...> class DevVec> Long test_v
     sctl::Vector<Long> scnt;
     st.GetData(sd, scnt, "f");
     const sctl::Vector<Real> gh = to_host(gd);
-    const sctl::Vector<Long> gco(ge - gb, gcnt.begin() + gb, false), sco(se - sb, scnt.begin() + sb, false);  // views of the owned slices
+    const sctl::Vector<Long> gco(ge - gb, gcnt.begin() + gb, false), sco(se - sb, scnt.begin() + sb, false);  // views of the owned ranges
     const Long goff = sctl::omp_par::reduce(gcnt.begin(), gb), soff = sctl::omp_par::reduce(scnt.begin(), sb);
     const Long gn = sctl::omp_par::reduce(gco.begin(), gco.Dim()), sn = sctl::omp_par::reduce(sco.begin(), sco.Dim());
     const sctl::Vector<const Real> gv(gn, gh.begin() + goff, false), sv(sn, sd.begin() + soff, false);
@@ -400,11 +416,12 @@ template <class Real, Integer DIM, template <class...> class DevVec> Long test_v
     PT gt(comm);
     sctl::PtTree<Real, DIM> st(comm);
     const Long N2 = N / 3;
-    sctl::Vector<Real> f(N * 2), g(N2), h(N);
+    sctl::Vector<Real> f(N * 2), g(N2), h(N), h2(N);
     for (Long i = 0; i < N; i++) {
       f[2 * i] = 1e6 * rank + i;
       f[2 * i + 1] = -(Real)i;
       h[i] = 0.5 * i + rank;
+      h2[i] = 2 * h[i] + 1;
     }
     for (Long i = 0; i < N2; i++) g[i] = 7e5 * rank + 3 * i;
     const DevVec<Real> fd(f.begin(), f.end()), gd(g.begin(), g.end()), hd(h.begin(), h.end()), y2d(y.begin(), y.begin() + N2 * DIM);
@@ -459,8 +476,65 @@ template <class Real, Integer DIM, template <class...> class DevVec> Long test_v
       std::copy(vf.begin(), vf.end(), vu.begin());
     }
     check("particle data round-trips (two groups, one set filled through the view)", round_trip("f", f) + round_trip("g", g) + round_trip("u", f) + particle_total());
+    { // the same through views into caller storage
+      gt.AddParticles("pv", gpu_tree::DataView<const Real, DevVec>(xd));
+      gt.AddParticleData("fv", "pv", gpu_tree::DataView<const Real, DevVec>(fd));
+      DevVec<Real> back(gt.ParticleDataSize("fv"));
+      gt.GetParticleData(gpu_tree::DataView<Real, DevVec>(back), "fv");
+      const sctl::Vector<Real> bh = to_host(back);
+      Long bad = (bh.Dim() != f.Dim());
+      if (!bad) for (Long i = 0; i < f.Dim(); i++) bad += (bh[i] != f[i]);
+      check("particle data round-trips through the view overloads", bad);
+      gt.DeleteParticleData("pv");
+    }
+    { // adding a group again replaces it in place; its data sets are emptied and keep their storage
+      gpu_tree::DataView<Real, DevVec> gv;
+      sctl::Vector<Real> sv;
+      sctl::Vector<Long> gc, sc;
+      gt.GetData(gv, gc, "g");
+      st.GetData(sv, sc, "g");
+      const Real* const gp = gv.data();
+      const Real* const sp = sv.Dim() ? &sv[0] : nullptr;  // a rank may hold none of the group
+      gt.AddParticles("q", y2d);
+      st.AddParticles("q", y2s);
+      st.GetData(sv, sc, "g");
+      Long bad = (gt.ParticleDataSize("g") != 0) + (sv.Dim() != 0) + (sctl::omp_par::reduce(sc.begin(), sc.Dim()) != 0);
+      gt.AddParticleData("g", "q", gd);
+      st.AddParticleData("g", "q", g);
+      gt.GetData(gv, gc, "g");
+      st.GetData(sv, sc, "g");
+      bad += (gv.data() != gp);
+#ifndef SCTL_MEMDEBUG  // a debug ReInit always reallocates
+      bad += ((sv.Dim() ? &sv[0] : nullptr) != sp);
+#endif
+      check("adding a particle group again replaces it and keeps its data sets' storage", bad + round_trip("g", g));
+      // a data set may be re-added under another group; then back
+      gt.AddParticleData("g", "pt", fd);
+      st.AddParticleData("g", "pt", f);
+      bad = round_trip("g", f);
+      gt.AddParticleData("g", "q", gd);
+      st.AddParticleData("g", "q", g);
+      check("adding a particle data set again may attach it to another group", bad + round_trip("g", g));
+      // a set left emptied is carried through the refinement below and re-added after it
+      gt.AddParticleData("e", "q", gd);
+      st.AddParticleData("e", "q", g);
+      gt.AddParticles("q", y2d);
+      st.AddParticles("q", y2s);
+      gt.AddParticleData("g", "q", gd);
+      st.AddParticleData("g", "q", g);
+    }
     gt.UpdateRefinement(yd, 25, true, sctl::Periodicity::NONE, 0);
     st.UpdateRefinement(y, 25, true, sctl::Periodicity::NONE, 0);
+    {
+      sctl::Vector<Real> se;
+      st.GetParticleData(se, "e");
+      Long bad = (gt.ParticleDataSize("e") != 0) + (se.Dim() != 0);
+      gt.AddParticleData("e", "q", gd);
+      st.AddParticleData("e", "q", g);
+      check("an emptied particle data set survives a repartition and can be added again", bad + round_trip("e", g));
+      gt.DeleteParticleData("e");
+      st.DeleteParticleData("e");
+    }
     // added after the repartition: the forward scatter with its re-cut stage
     gt.AddParticleData("h", "pt", hd);
     st.AddParticleData("h", "pt", h);
@@ -478,10 +552,27 @@ template <class Real, Integer DIM, template <class...> class DevVec> Long test_v
     st.AddParticleData("b", "pt", h);
     check("particle data round-trips for a set added after a Broadcast filled the ghost slots",
           round_trip("b", h) + round_trip("f", f) + round_trip("h", h));
+    { // the same name again: the new values go into the storage the set has
+      const DevVec<Real> h2d(h2.begin(), h2.end());
+      gpu_tree::DataView<const Real, DevVec> before, after;
+      sctl::Vector<Long> c;
+      gt.GetData(before, c, "b");
+      gt.AddParticleData("b", "pt", h2d);
+      gt.GetData(after, c, "b");
+      sctl::Vector<Real> sb, sa;
+      st.GetData(sb, c, "b");
+      st.AddParticleData("b", "pt", h2);
+      st.GetData(sa, c, "b");
+      Long moved = round_trip("b", h2) + (before.ptr != after.ptr) + (before.size() != after.size()) + (sb.Dim() != sa.Dim());
+#ifndef SCTL_MEMDEBUG  // Vector::ReInit reallocates in that mode even when the size fits
+      moved += (sb.begin() != sa.begin());
+#endif
+      check("adding a particle data set again replaces its values in the storage it has", moved);
+    }
     gt.UpdateRefinement(yd, 25, true, sctl::Periodicity::NONE, 0);
     st.UpdateRefinement(y, 25, true, sctl::Periodicity::NONE, 0);
     check("that set round-trips after the next refinement",
-          round_trip("b", h) + round_trip("f", f) + particle_total());
+          round_trip("b", h2) + round_trip("f", f) + particle_total());
     {
       const sctl::Vector<NodeT> m = to_host(gt.GetNodeMID());
       Long bad = 0;
@@ -564,11 +655,11 @@ static Long test_host_sink_spill() {
   Long bad = 0;
 
   sctl::ScratchBuf<NodeT> buf(cap, pool);
-  sctl::ScratchBuf<char> above(1, pool);  // `buf` is no longer the top-most slice, so it cannot grow
-  if (buf.RequestResize(buf.Dim() + 1) != buf.Dim()) bad++;  // the refusal the rest of this rests on
+  sctl::ScratchBuf<char> above(1, pool);  // `buf` is no longer the top-most allocation, so it cannot grow
+  if (buf.RequestResize(buf.size() + 1) != buf.size()) bad++;  // the refusal the rest of this rests on
 
   sctl::Vector<NodeT> spill;
-  gpu_tree::detail_build::HostSink<NodeT> sink{&buf, &spill, buf.Dim(), 16};
+  gpu_tree::detail_build::HostSink<NodeT> sink{&buf, &spill, buf.size(), 16};
 
   std::vector<NodeT> want(n);
   {  // a run of distinct nodes, stepped the way the walk steps
@@ -651,11 +742,15 @@ int main(int argc, char** argv) {
     const bool root = (sctl::Comm::World().Rank() == 0);
     Long fails = 0;
     const auto run = [root, &fails]() {
-      if (root) printf("HostVector backend\n");
+      if (root) printf("HostVector backend, double\n");
       fails += test_vs_sctl<double, 3, gpu_tree::HostVector>();
-      if (root) printf("DeviceVector backend\n");
+      if (root) printf("HostVector backend, float\n");
+      fails += test_vs_sctl<float, 3, gpu_tree::HostVector>();
+      if (root) printf("DeviceVector backend, double\n");
       fails += test_vs_sctl<double, 3, gpu_tree::DeviceVector>();
-      if (root) printf("std::vector backend\n");
+      if (root) printf("DeviceVector backend, float\n");
+      fails += test_vs_sctl<float, 3, gpu_tree::DeviceVector>();
+      if (root) printf("std::vector backend, double\n");
       fails += test_vs_sctl<double, 3, std::vector>();
       if (root) printf("partitionN over a stretch\n");
       fails += test_partitionN_stretch<gpu_tree::HostVector>("HostVector: the buffer comes back holding the stretch alone");

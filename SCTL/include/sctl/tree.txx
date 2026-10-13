@@ -512,9 +512,9 @@ namespace sctl {
             if (parent_mid.Dim() != Nnew) parent_mid.ReInit(Nnew);
           }
 
-          if (idx0 < ptree.Dim()) { // preorder traversal to add local nodes to parent_mid
+          if (idx0 < ptree.size()) { // preorder traversal to add local nodes to parent_mid
             TreeNode* node = &ptree[idx0];
-            const Morton<DIM> m_end = (idx1 < ptree.Dim() ? ptree[idx1].m : Morton<DIM>().Next());
+            const Morton<DIM> m_end = (idx1 < ptree.size() ? ptree[idx1].m : Morton<DIM>().Next());
             Long out = shared_pnode_dsp[tid];
             while (node->m < m_end) {
               if (node->flags != FLAG_MINS_ANC) parent_mid[out++] = node->m;
@@ -881,7 +881,7 @@ namespace sctl {
         Long send_size1 = (rank  > 0 ? M : 0);
         Long recv_size0 = (rank  > 0 ? M : 0);
         Long recv_size1 = (rank+1<np ? M : 0);
-        SCTL_ASSERT(recv_size0 + pt_mid.Dim() + recv_size1 <= pt_mid_.Dim());
+        SCTL_ASSERT(recv_size0 + pt_mid.Dim() + recv_size1 <= pt_mid_.size());
         omp_par::memcpy(pt_mid_.begin() + recv_size0, pt_mid.begin(), pt_mid.Dim());
 
         auto recv_req0 = comm.Irecv(pt_mid_.begin(), recv_size0, (rank+np-1)%np, 0);
@@ -948,7 +948,7 @@ namespace sctl {
 
           ScratchBuf<Morton<DIM>> buf(max_emits);  // NUMA-local: first-touched on this thread's node
           Vector<Morton<DIM>> spill;
-          Long cap = buf.Dim();
+          Long cap = buf.size();
           Long count = 0;
           const Long grow = std::max<Long>(max_emits / 4, 1024);
           // Growing the scratch keeps what is already written where it is, where `spill` copies on
@@ -1396,14 +1396,12 @@ namespace sctl {
     SCTL_ASSERT_MSG(cnt.Dim() == node_mid.Dim(), "Tree::AddData: one count per tree node.");
     SCTL_UNUSED(tree_detail::global_dof(comm, data.Dim(), omp_par::reduce(cnt.begin(), cnt.Dim())));  // checks the values divide evenly among the items
 
-    SCTL_ASSERT(node_data.find(name) == node_data.end());
     node_data[name].ReInit(data.Dim()*sizeof(ValueType), (Iterator<char>)data.begin(), true);
     node_cnt [name] = cnt;
   }
 
   template <Integer DIM> template <class ValueType> void Tree<DIM>::AddData(const std::string& name, Long dof, const Vector<Long>& cnt) {
     SCTL_ASSERT_MSG(cnt.Dim() == node_mid.Dim(), "Tree::AddData: one count per tree node.");
-    SCTL_ASSERT(node_data.find(name) == node_data.end());
     tree_detail::assert_same_dof(comm, dof, "Tree::AddData");
     node_data[name].ReInit(omp_par::reduce(cnt.begin(), cnt.Dim()) * dof * (Long)sizeof(ValueType));
     node_cnt [name] = cnt;
@@ -1750,7 +1748,7 @@ namespace sctl {
     for (auto& pair : groups) {  // payloads follow their keys' re-cut; per-node counts come from the particles
       const auto& pt_name = pair.first;
       auto& group = pair.second;
-      group.Repartition(partition_codes);
+      group.Repartition(&partition_codes[this->GetComm().Rank()]);
 
       ScratchBuf<Long> pt_cnt(node_mid.Dim());
       tree_detail::pt_node_counts(node_mid, group.SortedKeys(), pt_cnt.begin());
@@ -1781,7 +1779,6 @@ namespace sctl {
   }
 
   template <class Real, Integer DIM, class BaseTree> void PtTree<Real,DIM,BaseTree>::AddParticles(const std::string& name, const Vector<Real>& coord) {
-    SCTL_ASSERT(groups.find(name) == groups.end());
     Profile::Scoped prof_("PtTree::AddParticles", &this->GetComm(), true, 6);
 
     const Long N = coord.Dim() / DIM;
@@ -1793,7 +1790,17 @@ namespace sctl {
       pt_mid[i] = MortonCode<DIM>(&coord[i*DIM]);
     }
     auto& group = groups.try_emplace(name, this->GetComm()).first->second;
-    group.Init(pt_mid, partition_codes);
+    group.Init(pt_mid, &partition_codes[this->GetComm().Rank()]);
+    for (auto& kv : pt_data) { // an existing group's data sets no longer match its particles: emptied, storage kept
+      if (kv.second.particle_name == name && kv.first != name) {
+        Iterator<Vector<char>> data_;
+        Iterator<Vector<Long>> cnt_;
+        this->GetData_(data_, cnt_, kv.first);
+        data_[0].ReInit(0);
+        cnt_[0].SetZero();
+        kv.second.dof = 0;
+      }
+    }
     AddParticleData(name, name, coord);
   }
 
@@ -1812,13 +1819,12 @@ namespace sctl {
     Long owned0 = 0, owned1 = 0;
     this->GetOwnedRange(owned0, owned1);
     const Long begin = omp_par::reduce(cnt_->begin(), owned0) * dof * (Long)sizeof(Real);
-    group->second.ScatterForward((ConstIterator<char>)data.begin(), data_[0].begin() + begin, dof * (Long)sizeof(Real));
+    group->second.ScatterForward(data_[0].begin() + begin, (ConstIterator<char>)data.begin(), dof * (Long)sizeof(Real));
   }
 
   template <class Real, Integer DIM, class BaseTree> void PtTree<Real,DIM,BaseTree>::AddParticleData(const std::string& data_name, const std::string& particle_name, Long dof) {
     const auto group = groups.find(particle_name);
     SCTL_ASSERT(group != groups.end());
-    SCTL_ASSERT(pt_data.find(data_name) == pt_data.end());
     if (data_name == particle_name) { // the group's own coordinates: count its particles per node
       const auto& node_mid = this->GetNodeMID();
       ScratchBuf<Long> cnt(node_mid.Dim());
@@ -1847,13 +1853,17 @@ namespace sctl {
     const auto& group = groups.find(particle_name)->second;
 
     const auto& node_mid = this->GetNodeMID();
-    const auto& comm = this->GetComm();
 
     Vector<Long> cnt_;
     Vector<const Real> data_;
     this->GetData(data_, cnt_, data_name);
     SCTL_ASSERT(cnt_.Dim() == node_mid.Dim());
-    const Long dof = tree_detail::global_dof(comm, data_.Dim(), omp_par::reduce(cnt_.begin(), cnt_.Dim()));
+    const Long dof = pt_data.find(data_name)->second.dof;
+    SCTL_ASSERT(data_.Dim() == omp_par::reduce(cnt_.begin(), cnt_.Dim()) * dof);
+    if (dof == 0) { // an emptied set: nothing to scatter
+      if (data.Dim()) data.ReInit(0);
+      return;
+    }
     { // the owned items scatter back; a Broadcast may have put the owners' values around them
       Long owned0 = 0, owned1 = 0;
       this->GetOwnedRange(owned0, owned1);
@@ -1861,7 +1871,7 @@ namespace sctl {
       SCTL_ASSERT(omp_par::reduce(cnt_.begin() + owned0, owned1 - owned0) == group.SortedCount());
       const Long Nout = group.LocalCount() * dof;
       if (data.Dim() != Nout) data.ReInit(Nout);
-      group.ScatterReverse((ConstIterator<Real>)data_.begin() + start, data.begin(), dof);
+      group.ScatterReverse(data.begin(), (ConstIterator<Real>)data_.begin() + start, dof);
     }
   }
 

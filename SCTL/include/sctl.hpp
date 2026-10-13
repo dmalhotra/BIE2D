@@ -58,6 +58,8 @@
 #include "sctl/matrix.txx"
 #include "sctl/mat_utils.hpp"
 #include "sctl/mat_utils.txx"
+#include "sctl/small_gemm.hpp"
+#include "sctl/small_gemm.txx"
 #include "sctl/blas.h"
 #include "sctl/lapack.h"
 
@@ -77,6 +79,10 @@
 
 // Chebyshev basis
 #include "sctl/cheb_utils.hpp"
+
+// Piecewise Chebyshev table of a function
+#include "sctl/function-table.hpp"
+#include "sctl/function-table.txx"
 
 // Morton
 #include "sctl/morton.hpp"
@@ -102,7 +108,6 @@
 #include "sctl/generic-kernel.hpp"
 #include "sctl/generic-kernel.txx"
 #include "sctl/kernel_functions.hpp"
-#include "sctl/boundary_quadrature.hpp"
 
 // FMM wrapper
 #include "sctl/fmm-wrapper.hpp"

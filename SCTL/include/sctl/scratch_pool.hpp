@@ -2,6 +2,13 @@
 #define _SCTL_SCRATCH_POOL_HPP_
 
 #include <cstddef>            // for size_t
+#include <deque>              // the holders made incomplete for ScratchBuf below
+#include <forward_list>
+#include <list>
+#include <map>
+#include <memory>
+#include <optional>
+#include <unordered_map>
 
 #include "sctl/common.hpp"    // for Long, Integer, sctl
 #include "sctl/iterator.hpp"  // for Iterator, ConstIterator
@@ -42,7 +49,7 @@ struct alignas(SCTL_MEM_ALIGN) ScratchChunk {
  *
  *     {
  *       ScratchBuf<double> buf(N);
- *       // ... use buf[i], buf.begin(), buf.end(), buf.Dim() ...
+ *       // ... use buf[i], buf.begin(), buf.end(), buf.size() ...
  *     }                                  // buf is freed here
  *
  * Rules:
@@ -83,7 +90,7 @@ template <class T> class ScratchBuf {
   Iterator<T>      end();
   ConstIterator<T> begin() const;
   ConstIterator<T> end()   const;
-  Long             Dim() const;
+  Long             size() const;
   T&               operator[](Long i);
   const T&         operator[](Long i) const;
 
@@ -195,5 +202,16 @@ class ScratchPool {
 };
 
 }  // namespace sctl
+
+namespace std {
+// Incomplete on purpose: a `ScratchBuf` must be a named local, released in stack order.
+template <class T> class optional<sctl::ScratchBuf<T>>;
+template <class T> class shared_ptr<sctl::ScratchBuf<T>>;
+template <class T, class A> class list<sctl::ScratchBuf<T>, A>;
+template <class T, class A> class forward_list<sctl::ScratchBuf<T>, A>;
+template <class T, class A> class deque<sctl::ScratchBuf<T>, A>;
+template <class K, class T, class C, class A> class map<K, sctl::ScratchBuf<T>, C, A>;
+template <class K, class T, class H, class E, class A> class unordered_map<K, sctl::ScratchBuf<T>, H, E, A>;
+}  // namespace std
 
 #endif  // _SCTL_SCRATCH_POOL_HPP_

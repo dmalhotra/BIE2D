@@ -1,10 +1,12 @@
 #ifndef _SCTL_PROFILE_HPP_
 #define _SCTL_PROFILE_HPP_
 
+#include <map>               // for table output
 #include <string>            // for basic_string, string
 #include <vector>            // for vector
 
 #include "sctl/common.hpp"   // for Long, Integer, sctl
+#include "sctl/math_utils.hpp"  // for IsComplex
 
 #ifndef SCTL_PROFILE
 #define SCTL_PROFILE -1
@@ -38,12 +40,28 @@ enum class ProfileCounter: Long {
 };
 
 /**
+ * Real floating-point operations that ProfileCounter::FLOP counts for one operation on a value of
+ * type A and one of type B: 1 for real types, and for std::complex those of the usual formulas,
+ * fewer when one of the two values is real.
+ *
+ * @tparam A, B Types of the two values.
+ */
+template <class A, class B = A> struct FlopCount {
+  static constexpr bool ComplexA = IsComplex<std::remove_cv_t<A>>, ComplexB = IsComplex<std::remove_cv_t<B>>;
+  static constexpr Long Add = (ComplexA && ComplexB ? 2 : 1); // a + b or a - b
+  static constexpr Long Mul = (ComplexA && ComplexB ? 6 : (ComplexA || ComplexB ? 2 : 1)); // a b: 4 multiplies and 2 adds if both are complex
+  static constexpr Long Div = (ComplexB ? (ComplexA ? 11 : 7) : (ComplexA ? 2 : 1)); // a / b = a conj(b) / |b|^2: 6 multiplies, 3 adds and 2 divides if both are complex
+  static constexpr Long MulAdd = Mul + (ComplexA || ComplexB ? 2 : 1); // c + a b
+};
+
+/**
  * This class allows for manual instrumentation of code. It allows the user to define profiling blocks. It then reports
  * the change in values of various counters (time, flops, memory allocations, etc) between the start and end of each
  * profiling block. The macro `SCTL_PROFILE` must be defined to enable compiling with instrumentation.
  */
 class Profile {
   static constexpr Long Nfield = (Long)ProfileCounter::FIELD_COUNT;
+  using ProfileTable = std::vector<std::pair<std::string, std::map<std::string, double>>>;
 
   template <typename E> class ExprWrapper;
   using ProfExpr = ExprWrapper<void>;
@@ -159,6 +177,15 @@ class Profile {
    * operation on the output of e1.
    */
   static ProfExpr CommReduceExpr(const ProfExpr& e1, const CommOp comm_op);
+
+  /**
+   * Generate a flat table of the profiling output.
+   *
+   * @param[in] comm_ pointer to Comm object (can be nullptr).
+   *
+   * @param[in] field_names_in list of fields to display in the profiling output. Empty will use the default. See GetProfExpr for more info.
+   */
+  static ProfileTable get_table(const std::vector<std::string>& field_names_in, const Comm* comm_);
 
   /**
    * Display the profiling output.

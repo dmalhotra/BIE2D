@@ -13,7 +13,14 @@
 #endif
 
 #include <cstddef>
+#include <deque>  // the holders made incomplete for DeviceScratch below
+#include <forward_list>
+#include <list>
+#include <map>
+#include <memory>
+#include <optional>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 #include "sctl/common.hpp"
@@ -30,80 +37,6 @@ using sctl::Long;
 
 namespace detail {
 
-/**
- * The device-runtime calls made here, over whichever runtime is compiling this file. CUDA and HIP
- * spell them the same way under different prefixes, so only the names differ. A build with neither
- * cannot produce a device pointer, so `CopyToHost` is unreachable there and the rest have nothing
- * to do -- which is what a host backend wants.
- *
- * `__HIPCC__` is tested first: on the NVIDIA platform hipcc defines both, and there the hip names
- * are the cuda ones.
- */
-namespace gpu_runtime {
-
-/** Page-lock `bytes` at `p` so the driver can copy out of it directly. False if the runtime refused. */
-inline bool HostRegister(void* p, std::size_t bytes) {
-#if defined(__HIPCC__)
-  return hipHostRegister(p, bytes, hipHostRegisterDefault) == hipSuccess;
-#elif defined(__CUDACC__)
-  return cudaHostRegister(p, bytes, cudaHostRegisterDefault) == cudaSuccess;
-#else
-  (void)p;
-  (void)bytes;
-  return true;  // nothing to pin
-#endif
-}
-
-/** Undo `HostRegister`. Runs at exit, where the runtime may already be gone, so the result is of no use. */
-inline void HostUnregister(void* p) {
-#if defined(__HIPCC__)
-  hipHostUnregister(p);
-#elif defined(__CUDACC__)
-  cudaHostUnregister(p);
-#else
-  (void)p;
-#endif
-}
-
-/** Copy `bytes` of device memory at `src` to host memory at `dst`. False if the runtime refused. */
-inline bool CopyToHost(void* dst, const void* src, std::size_t bytes) {
-#if defined(__HIPCC__)
-  return hipMemcpy(dst, src, bytes, hipMemcpyDeviceToHost) == hipSuccess;
-#elif defined(__CUDACC__)
-  return cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
-#else
-  (void)dst;
-  (void)src;
-  (void)bytes;
-  return false;  // no runtime to copy with, and no device pointer to copy from
-#endif
-}
-
-/** Fill `bytes` of device memory at `p` with `value`. False if the runtime refused. */
-inline bool MemsetDevice(void* p, int value, std::size_t bytes) {
-#if defined(__HIPCC__)
-  return hipMemset(p, value, bytes) == hipSuccess;
-#elif defined(__CUDACC__)
-  return cudaMemset(p, value, bytes) == cudaSuccess;
-#else
-  (void)p;
-  (void)value;
-  (void)bytes;
-  return false;  // no runtime, and no device pointer to fill
-#endif
-}
-
-/** Wait for the device to finish what it has been given. */
-inline void DeviceSynchronize() {
-#if defined(__HIPCC__)
-  hipDeviceSynchronize();
-#elif defined(__CUDACC__)
-  cudaDeviceSynchronize();
-#endif
-}
-
-}  // namespace gpu_runtime
-
 // True iff `Vec::data()` returns a thrust::device_ptr (i.e. Vec is GPU-resident).
 template <class T> struct is_device_ptr                        : std::false_type {};
 template <class T> struct is_device_ptr<thrust::device_ptr<T>> : std::true_type  {};
@@ -116,68 +49,51 @@ template <class T, template <class...> class DevVec>
 using ScratchIterator = std::conditional_t<is_device_vector_v<DevVec<T>>, thrust::device_ptr<T>, T*>;
 
 /**
- * Long-lived working storage for an array that is rebuilt on every call. Unlike `DeviceScratch`
- * (fixed size, LIFO, released at scope exit) this grows on demand and is retained for the process,
- * so an array that ends up the same size each call stops allocating after the first. Swap into it
- * instead of assigning a fresh vector and the storage is recycled rather than freed and retaken --
- * which matters because a release is an allocator round trip and drains the device.
+ * Copy `n` elements of device storage into a host buffer.
  *
- * `Tag` separates independent arrays so two of them do not share one buffer. Retention is deliberate,
- * as in `DeviceScratchPool`. Like the pool, the buffers are process-wide: a caller that runs two
- * builds concurrently in one process must not share a tag between them.
- */
-template <class T, template <class...> class DevVec, auto Tag> DevVec<T>& PersistentBuffer();
-
-/**
- * Size a buffer for output it is about to be given in full. `resize` alone preserves the contents,
- * which are dead in that case, and copies them when the buffer has to grow -- a device-to-device
- * copy of the whole buffer on the CUDA backend.
- */
-template <class T, template <class...> class DevVec> void resizeDiscard(DevVec<T>& v, Long n);
-
-/**
- * Copy `n` elements of device storage into a host buffer, staged through a retained pinned buffer.
- *
- * A caller-owned destination is pageable and usually freshly allocated, which costs twice over:
- * the driver cannot DMA into it, and it faults in a page at a time inside the driver's copy. Taking
- * the DMA into pinned memory, then filling the destination with the host threads, avoids both. The
- * staging buffer comes from `pinnedStagingPool()` and is live only within the call.
+ * A pageable buffer costs twice over: the driver cannot move it directly, and it faults in a page
+ * at a time inside the driver's copy. Taking the transfer through page-locked memory from
+ * `pinnedStagingPool()`, then filling the destination with the host threads, avoids both. A
+ * destination that is page-locked already takes the transfer directly; `pinned` asserts that it is,
+ * skipping the query.
  *
  * On host backends `src` is already a host pointer and this is a plain copy.
  */
-template <class SrcPtr, class DstPtr> void deviceToHost(SrcPtr src, Long n, DstPtr dst);
+template <class SrcPtr, class DstPtr> void deviceToHost(SrcPtr src, Long n, DstPtr dst, bool pinned = false);
+
+/** `n` elements of a host buffer into device storage; `deviceToHost` the other way round. */
+template <class SrcPtr, class DstPtr> void hostToDevice(SrcPtr src, Long n, DstPtr dst, bool pinned = false);
 
 /**
- * Host staging memory for `deviceToHost`, as one byte-addressed arena shared by every element type
- * rather than a buffer per type. Chunks are registered with the driver so the DMA writes into pinned
- * memory, and registration follows the pages being faulted in: registering them cold instead costs
- * several times as much and places the whole chunk on the faulting thread's NUMA node.
+ * Page-locked host staging memory, as one byte-addressed arena shared by every element type rather
+ * than a buffer per type. Chunks are registered with the driver so a DMA can write into them, and
+ * registration follows the pages being faulted in: registering them cold instead costs several
+ * times as much and places the whole chunk on the faulting thread's NUMA node.
  *
- * The retained chunk grows to the largest request and is never shrunk, so one big copy leaves that
- * much host memory page-locked for the process.
+ * The retained chunk grows to the largest request and is never shrunk, so one big request leaves
+ * that much host memory page-locked for the process.
  *
- * Not thread-safe, like any pool outside `ScratchPool::Instance()`. Every `deviceToHost` call site
- * runs outside a parallel region, and its buffer never outlives the call, so the pool sees one
- * allocation at a time.
+ * Not thread-safe, like any pool outside `ScratchPool::Instance()`: take from it outside parallel
+ * regions, one buffer at a time, and release the buffer before returning to the caller.
  */
 sctl::ScratchPool& pinnedStagingPool();
 
 }  // namespace detail
 
 /**
- * Bump allocator backing `DeviceScratch`, one instance per backend (`Instance()`).
+ * Bump allocator for backend scratch memory, one instance per backend (`Instance()`).
  *
  * Allocation is a pointer bump inside a chunk; on overflow a new chunk is added (doubling) and
  * older chunks stay live, so outstanding pointers remain valid. The head chunk is retained however
- * empty it gets -- that is the point, since releasing backend memory costs ~1 ms per large block
- * and would dominate the tree build. An older chunk is handed back once it empties, so after a few
- * builds the pool converges on one chunk holding the high-water mark.
+ * empty it gets -- that is the point, since releasing backend memory costs ~1 ms per large block.
+ * An older chunk is released once it empties, so after a few rounds of use the pool converges on
+ * one chunk holding the high-water mark.
  *
  * Not thread-safe: one pool serves the thread issuing the backend calls.
  */
 template <template <class...> class DevVec> class DeviceScratchPool {
  public:
-  // Chunk bases and slice sizes are both rounded to this, so every slice starts aligned for any
+  // Chunk bases and allocation sizes are both rounded to this, so every allocation starts aligned for any
   // type the pool hands out. The device's blocks arrive 256-aligned already; the host's give only 16.
   static constexpr Long ALIGN = SCTL_MEM_ALIGN;
 
@@ -205,9 +121,9 @@ template <template <class...> class DevVec> class DeviceScratchPool {
   template <class, template <class...> class> friend class DeviceScratch;
   template <template <class...> class> friend class DeviceScratchAllocator;
 
-  /** One chunk of the pool; `DeviceScratch` holds the chunk its slice came from. */
+  /** One block of backend memory: allocations are taken from it in order and freed in reverse order. */
   struct alignas(SCTL_MEM_ALIGN) Chunk {
-    DevVec<char>* buf;  // released when the chunk is shed; at exit only on host backends
+    DevVec<char>* buf;  // released with the chunk; at exit only on host backends
     char* base;
     char* top;
     char* end;
@@ -215,26 +131,26 @@ template <template <class...> class DevVec> class DeviceScratchPool {
     Long live_count;  // maintained under SCTL_MEMDEBUG only, as ScratchPool does
   };
 
-  /** Carve `bytes` off the pool; returns the owning chunk and the slice. */
+  /** Allocate `bytes` from the pool; returns the chunk the allocation came from and its pointer. */
   std::pair<Chunk*, char*> AllocBytes(Long bytes);
 
-  /** Return a slice (LIFO: it must be the last one taken from `chunk`). */
+  /** Free an allocation (LIFO: it must be the last one taken from `chunk`). */
   void FreeBytes(Chunk* chunk, char* p, Long bytes);
 
-  /** Give the slice back and shed the chunk if that emptied it. */
+  /** Free the allocation and release the chunk if that emptied it. */
   void Rewind(Chunk* chunk, char* p);
 
-  /** Bytes of trailer past each slice: nonzero only under SCTL_MEMDEBUG on a host backend. */
+  /** Bytes of trailer past each allocation: nonzero only under SCTL_MEMDEBUG on a host backend. */
   static constexpr Long Redzone();
 
-  /** Stamp the trailer past a slice, so `CheckRedzone` can tell it was written over. */
+  /** Stamp the trailer past an allocation, so `CheckRedzone` can tell it was written over. */
   static void StampRedzone(char* p, Long bytes);
 
   /** Verify the trailer stamped by `AllocBytes`. */
   static void CheckRedzone(const char* p, Long bytes);
 
-  /** What a slice of `bytes` consumes: rounded up to `ALIGN`, and never zero, so that
-   *  `top == base` means the chunk holds no live slice. */
+  /** What an allocation of `bytes` consumes: rounded up to `ALIGN`, and never zero, so that
+   *  `top == base` means the chunk holds no live allocation. */
   static Long PaddedBytes(Long bytes);
 
   /** Same, with the owning chunk located by the LIFO invariant. */
@@ -246,7 +162,7 @@ template <template <class...> class DevVec> class DeviceScratchPool {
 };
 
 /**
- * RAII handle to a scratch buffer carved out of `DeviceScratchPool<DevVec>`.
+ * RAII handle to a scratch buffer allocated from `DeviceScratchPool<DevVec>`.
  *
  *     {
  *       DeviceScratch<Morton<3>, DevVec> buf(n);
@@ -286,7 +202,7 @@ template <class T, template <class...> class DevVec> class DeviceScratch {
   iterator begin() const;
   iterator end() const;
   iterator data() const;  // thrust convention: use raw_pointer_cast for functors
-  Long Dim() const;
+  Long size() const;
 
  private:
   Pool* pool_;
@@ -308,6 +224,17 @@ template <template <class...> class DevVec> class DeviceScratchAllocator {
 };
 
 }  // namespace gpu_tree
+
+namespace std {
+// Incomplete on purpose: a `DeviceScratch` must be a named local, released in stack order.
+template <class T, template <class...> class V> class optional<gpu_tree::DeviceScratch<T, V>>;
+template <class T, template <class...> class V> class shared_ptr<gpu_tree::DeviceScratch<T, V>>;
+template <class T, template <class...> class V, class A> class list<gpu_tree::DeviceScratch<T, V>, A>;
+template <class T, template <class...> class V, class A> class forward_list<gpu_tree::DeviceScratch<T, V>, A>;
+template <class T, template <class...> class V, class A> class deque<gpu_tree::DeviceScratch<T, V>, A>;
+template <class K, class T, template <class...> class V, class C, class A> class map<K, gpu_tree::DeviceScratch<T, V>, C, A>;
+template <class K, class T, template <class...> class V, class H, class E, class A> class unordered_map<K, gpu_tree::DeviceScratch<T, V>, H, E, A>;
+}  // namespace std
 
 #include "sctl/experimental/device_scratch.txx"
 

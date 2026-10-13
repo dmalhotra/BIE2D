@@ -29,7 +29,10 @@ namespace sctl {
      * identical results from uKerMatrix.
      */
 
+    // SingularOrder: kernel grows like 1/r^order toward the surface. Read by the on-surface
+    // hedgehog scheme; steeper needs a smaller proxy offset and tighter quadrature.
     struct Laplace3D_FxU {
+      static constexpr Integer SingularOrder() { return 1; }
       static const std::string& Name() {
         static const std::string name = "Laplace3D-FxU";
         return name;
@@ -59,6 +62,7 @@ namespace sctl {
     };
 
     struct Laplace3D_DxU {
+      static constexpr Integer SingularOrder() { return 2; }
       static const std::string& Name() {
         static const std::string name = "Laplace3D-DxU";
         return name;
@@ -79,6 +83,7 @@ namespace sctl {
     };
 
     struct Laplace3D_FxdU {
+      static constexpr Integer SingularOrder() { return 2; }
       static const std::string& Name() {
         static const std::string name = "Laplace3D-FxdU";
         return name;
@@ -123,6 +128,7 @@ namespace sctl {
     };
 
     struct Stokes3D_FxU {
+      static constexpr Integer SingularOrder() { return 1; }
       static const std::string& Name() {
         static const std::string name = "Stokes3D-FxU";
         return name;
@@ -178,6 +184,7 @@ namespace sctl {
     };
 
     struct Stokes3D_DxU {
+      static constexpr Integer SingularOrder() { return 2; }
       static const std::string& Name() {
         static const std::string name = "Stokes3D-DxU";
         return name;
@@ -218,6 +225,7 @@ namespace sctl {
     };
 
     struct Stokes3D_FxT {
+      static constexpr Integer SingularOrder() { return 2; }
       static const std::string& Name() {
         static const std::string name = "Stokes3D-FxT";
         return name;
@@ -262,6 +270,7 @@ namespace sctl {
     };
 
     struct Stokes3D_FSxU {
+      static constexpr Integer SingularOrder() { return 2; }   // 1/r velocity, 1/r^2 source column
       static const std::string& Name() {
         static const std::string name = "Stokes3D-FSxU";
         return name;
@@ -323,6 +332,7 @@ namespace sctl {
     };
 
     struct Stokes3D_FxUP {
+      static constexpr Integer SingularOrder() { return 2; }   // 1/r velocity, 1/r^2 pressure column
       static const std::string& Name() {
         static const std::string name = "Stokes3D-FxUP";
         return name;
@@ -390,6 +400,7 @@ namespace sctl {
     };
 
     struct Laplace3D_DxdU {
+      static constexpr Integer SingularOrder() { return 3; }
       static const std::string& Name() {
         static const std::string name = "Laplace3D-DxdU";
         return name;
@@ -414,6 +425,7 @@ namespace sctl {
     };
 
     struct BiotSavart3D_FxU {
+      static constexpr Integer SingularOrder() { return 2; }
       static const std::string& Name() {
         static const std::string name = "BiotSavart3D-FxU";
         return name;
@@ -505,7 +517,7 @@ namespace sctl {
         const VecType r2 = r[0]*r[0]+r[1]*r[1]+r[2]*r[2];
         const VecType rinv = approx_rsqrt<digits>(r2, r2 > VecType::Zero());
         VecType sin_rmu, cos_rmu;
-        sincos(sin_rmu, cos_rmu, r2 * rinv * mu);
+        approx_sincos<digits, false>(sin_rmu, cos_rmu, r2 * rinv * mu);
         u[0][0] = cos_rmu * rinv; u[0][1] = sin_rmu * rinv;
         u[1][0] = -u[0][1];       u[1][1] = u[0][0];
       }
@@ -517,7 +529,7 @@ namespace sctl {
         const VecType r2 = r[0]*r[0]+r[1]*r[1]+r[2]*r[2];
         const VecType rinv = approx_rsqrt<digits>(r2, r2 > VecType::Zero());
         VecType sin_rmu, cos_rmu;
-        sincos(sin_rmu, cos_rmu, r2 * rinv * mu);
+        approx_sincos<digits, false>(sin_rmu, cos_rmu, r2 * rinv * mu);
         const VecType G0 = cos_rmu * rinv, G1 = sin_rmu * rinv;
         for (Integer k = 0; k < DOF; k++) {
           v[k*2+0] += f[k*2+0]*G0 - f[k*2+1]*G1;
@@ -545,7 +557,7 @@ namespace sctl {
         const VecType rinv2 = rinv * rinv;
         const VecType ndotr = n[0]*r[0] + n[1]*r[1] + n[2]*r[2];
         VecType sin_rmu, cos_rmu;
-        sincos(sin_rmu, cos_rmu, r2 * rinv * mu);
+        approx_sincos<digits, false>(sin_rmu, cos_rmu, r2 * rinv * mu);
         u[0][0] = (-mu*sin_rmu - cos_rmu * rinv) * rinv2 * ndotr;
         u[0][1] = ( mu*cos_rmu - sin_rmu * rinv) * rinv2 * ndotr;
         u[1][0] = -u[0][1];  u[1][1] = u[0][0];
@@ -560,7 +572,7 @@ namespace sctl {
         const VecType rinv2 = rinv * rinv;
         const VecType ndotr = n[0]*r[0] + n[1]*r[1] + n[2]*r[2];
         VecType sin_rmu, cos_rmu;
-        sincos(sin_rmu, cos_rmu, r2 * rinv * mu);
+        approx_sincos<digits, false>(sin_rmu, cos_rmu, r2 * rinv * mu);
         const VecType G0 = (-mu*sin_rmu - cos_rmu * rinv) * rinv2 * ndotr;
         const VecType G1 = ( mu*cos_rmu - sin_rmu * rinv) * rinv2 * ndotr;
         for (Integer k = 0; k < DOF; k++) {
@@ -588,7 +600,7 @@ namespace sctl {
         const VecType rinv = approx_rsqrt<digits>(r2, r2 > VecType::Zero());
         const VecType rinv2 = rinv * rinv;
         VecType sin_rmu, cos_rmu;
-        sincos(sin_rmu, cos_rmu, r2 * rinv * mu);
+        approx_sincos<digits, false>(sin_rmu, cos_rmu, r2 * rinv * mu);
         const VecType G0 = (-mu*sin_rmu - cos_rmu * rinv) * rinv2;
         const VecType G1 = ( mu*cos_rmu - sin_rmu * rinv) * rinv2;
         for (Integer i = 0; i < 3; i++) {
@@ -605,7 +617,7 @@ namespace sctl {
         const VecType rinv = approx_rsqrt<digits>(r2, r2 > VecType::Zero());
         const VecType rinv2 = rinv * rinv;
         VecType sin_rmu, cos_rmu;
-        sincos(sin_rmu, cos_rmu, r2 * rinv * mu);
+        approx_sincos<digits, false>(sin_rmu, cos_rmu, r2 * rinv * mu);
         const VecType G0 = (-mu*sin_rmu - cos_rmu * rinv) * rinv2;
         const VecType G1 = ( mu*cos_rmu - sin_rmu * rinv) * rinv2;
         for (Integer k = 0; k < DOF; k++) {
@@ -643,7 +655,7 @@ namespace sctl {
         const VecType rinv2 = rinv * rinv;
 
         VecType sin_h, cos_h;
-        sincos(sin_h, cos_h, r2 * rinv * mu * VecType((Real)0.5));
+        approx_sincos<digits, false>(sin_h, cos_h, r2 * rinv * mu * VecType((Real)0.5));
         const VecType two((Real)2);
         const VecType sin_rmu = two * sin_h * cos_h;
         const VecType cos_rmu_m1 = -two * sin_h * sin_h;
@@ -734,8 +746,8 @@ namespace sctl {
   using Stokes3D_FxU = GenericKernel<kernel_impl::Stokes3D_FxU>;
   using Stokes3D_DxU = GenericKernel<kernel_impl::Stokes3D_DxU>;
   using Stokes3D_FxT = GenericKernel<kernel_impl::Stokes3D_FxT>; // single-layer source ---> traction-tensor
-  using Stokes3D_FSxU = GenericKernel<kernel_impl::Stokes3D_FSxU>; // single-layer + source/sink ---> velocity (required for FMM translations involving double-layer - M2M, M2L, M2T)
-  using Stokes3D_FxUP = GenericKernel<kernel_impl::Stokes3D_FxUP>; // single-layer source ---> velocity + pressure
+  using Stokes3D_FSxU = GenericKernel<kernel_impl::Stokes3D_FSxU>; // single-layer + source/sink ---> velocity (required for FMM translations involving double-layer - M2M, M2L, M2T); the source term s r/(8 pi |r|^3) is half the velocity of a point source of volume flux s, a scale that the equivalent densities of FMM translations absorb
+  using Stokes3D_FxUP = GenericKernel<kernel_impl::Stokes3D_FxUP>; // single-layer source ---> velocity + pressure; the pressure (f.r)/(8 pi |r|^3) is half that of the Stokeslet, (f.r)/(4 pi |r|^3), a scale that the check potentials of FMM translations absorb
 
   using Stokes2D_FxU = GenericKernel<kernel_impl::Stokes2D_FxU>;
   using Stokes2D_DxU = GenericKernel<kernel_impl::Stokes2D_DxU>;
