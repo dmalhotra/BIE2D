@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (C) 2023-2026 The Simons Foundation, Inc. and the BIE2D authors (see NOTICE)
+# Authors: Dhairya Malhotra, Dan Fortunato, Mariana Martinez Aguilar
+# SPDX-License-Identifier: Apache-2.0
 
 export OMP_NUM_THREADS=7
 export NUM_MPI_PROCS=9

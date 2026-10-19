@@ -1,3 +1,7 @@
+// Copyright (C) 2023-2026 The Simons Foundation, Inc. and the BIE2D authors (see NOTICE)
+// Authors: Dhairya Malhotra, Dan Fortunato, Mariana Martinez Aguilar
+// SPDX-License-Identifier: Apache-2.0
+
 #include <bie2d.hpp>
 #include <fstream>
 #include <random>
