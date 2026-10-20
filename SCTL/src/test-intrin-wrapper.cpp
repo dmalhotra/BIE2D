@@ -1,3 +1,7 @@
+// Copyright (C) 2017-2026 The Simons Foundation, Inc. and the SCTL authors (see NOTICE)
+// Author: Dhairya Malhotra
+// SPDX-License-Identifier: Apache-2.0
+
 // Per-function tests for sctl/intrin-wrapper.hpp.
 //
 // intrin-wrapper provides VData-level SIMD primitives parameterized over
@@ -13,6 +17,7 @@
 
 #include "sctl/common.hpp"
 #include "sctl/intrin-wrapper.hpp"
+#include "sctl/intrin-wrapper.txx"
 
 #include "test-utils.hpp"
 

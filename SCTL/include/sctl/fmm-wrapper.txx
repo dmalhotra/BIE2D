@@ -1,3 +1,8 @@
+// Copyright (C) 2017-2026 The Simons Foundation, Inc. and the SCTL authors (see NOTICE)
+// Authors: Dhairya Malhotra, Xuanzhao Gao
+// SPDX-License-Identifier: Apache-2.0
+// Modified in BIE2D by Dhairya Malhotra: Stokes 2D FMM through FMM2D (SCTL_HAVE_FMM2D), and a 2D test.
+
 #ifndef _SCTL_FMM_WRAPPER_TXX_
 #define _SCTL_FMM_WRAPPER_TXX_
 
@@ -36,6 +41,8 @@
 #include <pvfmm.hpp>
 #endif
 
+#include <type_traits>                // for false_type, true_type, void_t
+
 #ifdef SCTL_HAVE_FMM2D
 extern "C" {
 void stfmm2d_(int* nd, double* eps, int* nsource, double* source, int* ifstoklet,
@@ -47,6 +54,22 @@ void stfmm2d_(int* nd, double* eps, int* nsource, double* source, int* ifstoklet
 #endif
 
 namespace sctl {
+
+namespace detail {
+  template <class Ker, class = void> struct HasCtxPtr : std::false_type {};
+  template <class Ker> struct HasCtxPtr<Ker, std::void_t<decltype(std::declval<const Ker&>().GetCtxPtr())>> : std::true_type {};
+
+  /**
+   * Whether PVFMM can evaluate ker: PVFMM calls kernels without their context pointer, and translation kernels
+   * (M2M, M2L, L2L, M2T, L2T) act on equivalent densities, which have no normals.
+   */
+  template <class Ker> bool PVFMMCompatibleKernel(const Ker& ker, bool translation) {
+    if constexpr (HasCtxPtr<Ker>::value) {
+      if (ker.GetCtxPtr() != nullptr) return false;
+    }
+    return !translation || Ker::NormalDim() == 0;
+  }
+}
 
 template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::test(const Comm& comm) {
   if (DIM == 2) {
@@ -195,6 +218,7 @@ template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::FMMKernels {
   pvfmm::Kernel<Real> pvfmm_ker_m2m;
   pvfmm::Kernel<Real> pvfmm_ker_m2l;
   pvfmm::Kernel<Real> pvfmm_ker_l2l;
+  bool pvfmm_compat = true; // PVFMM can evaluate ker_m2m, ker_m2l, ker_l2l
   #endif
 };
 template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::SrcData {
@@ -212,6 +236,7 @@ template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::SrcData {
   pvfmm::Kernel<Real> pvfmm_ker_s2m;
   pvfmm::Kernel<Real> pvfmm_ker_s2l;
   StaticArray<Real, DIM*2> bbox;
+  bool pvfmm_compat = true; // PVFMM can evaluate ker_s2m, ker_s2l
   #endif
 };
 template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::TrgData {
@@ -229,6 +254,7 @@ template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::TrgData {
   pvfmm::Kernel<Real> pvfmm_ker_m2t;
   pvfmm::Kernel<Real> pvfmm_ker_l2t;
   StaticArray<Real, DIM*2> bbox;
+  bool pvfmm_compat = true; // PVFMM can evaluate ker_m2t, ker_l2t
   #endif
 };
 template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::S2TData {
@@ -250,6 +276,7 @@ template <class Real, Integer DIM> struct ParticleFMM<Real,DIM>::S2TData {
   mutable pvfmm::PtFMM<Real> fmm_ctx;
   mutable bool setup_tree = false;
   mutable bool setup_ker = false;
+  bool pvfmm_compat = true; // PVFMM can evaluate ker_s2t
   #endif
 };
 
@@ -400,6 +427,7 @@ template <class Real, Integer DIM> template <class KerM2M, class KerM2L, class K
   fmm_ker.delete_ker_l2l = DeleteKer<KerL2L>;
 
   #ifdef SCTL_HAVE_PVFMM
+  fmm_ker.pvfmm_compat = detail::PVFMMCompatibleKernel(ker_m2m, true) && detail::PVFMMCompatibleKernel(ker_m2l, true) && detail::PVFMMCompatibleKernel(ker_l2l, true);
   if (DIM == 3) {
     fmm_ker.pvfmm_ker_m2m = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerM2M>>(ker_m2m.Name().c_str(), DIM, std::pair<int,int>(ker_m2m.SrcDim(), ker_m2m.TrgDim()));
     if (m2l_vol_poten) {
@@ -450,6 +478,7 @@ template <class Real, Integer DIM> template <class KerS2M, class KerS2L> void Pa
   data.delete_ker_s2l = DeleteKer<KerS2L>;
 
   #ifdef SCTL_HAVE_PVFMM
+  data.pvfmm_compat = detail::PVFMMCompatibleKernel(ker_s2m, false) && detail::PVFMMCompatibleKernel(ker_s2l, false);
   if (DIM == 3) {
     if (data.dim_normal) {
       data.pvfmm_ker_s2m = pvfmm::BuildKernel<Real, PVFMMKernelFn<KerS2M,true>, PVFMMKernelFn<KerS2M>>(ker_s2m.Name().c_str(), DIM, std::pair<int,int>(ker_s2m.SrcDim(), ker_s2m.TrgDim()));
@@ -491,6 +520,7 @@ template <class Real, Integer DIM> template <class KerM2T, class KerL2T> void Pa
   data.delete_ker_l2t = DeleteKer<KerL2T>;
 
   #ifdef SCTL_HAVE_PVFMM
+  data.pvfmm_compat = detail::PVFMMCompatibleKernel(ker_m2t, true) && detail::PVFMMCompatibleKernel(ker_l2t, true);
   if (DIM == 3) {
     if (m2t_vol_poten) {
       const auto SrcDim = ker_m2t.SrcDim();
@@ -539,6 +569,7 @@ template <class Real, Integer DIM> template <class KerS2T> void ParticleFMM<Real
   data.delete_ker_s2t = DeleteKer<KerS2T>;
 
   #ifdef SCTL_HAVE_PVFMM
+  data.pvfmm_compat = detail::PVFMMCompatibleKernel(ker_s2t, false);
   if (DIM == 3) {
     BuildSrcTrgScal(data, !comm_.Rank());
     if (data.dim_normal) {
@@ -1099,9 +1130,23 @@ template <class SCTLKernel, bool use_dummy_normal> template <class VecType, int 
   }
 }
 
+template <class Real, Integer DIM> bool ParticleFMM<Real,DIM>::PVFMMCompatible(const std::string& trg_name) const {
+  if (!fmm_ker.pvfmm_compat || !trg_map.at(trg_name).pvfmm_compat) return false;
+  for (const auto& it : s2t_map) {
+    if (it.first.second != trg_name) continue;
+    if (!it.second.pvfmm_compat || !src_map.at(it.first.first).pvfmm_compat) return false;
+  }
+  return true;
+}
+
 template <class Real, Integer DIM> bool ParticleFMM<Real,DIM>::UsePVFMM(const std::string& trg_name) const {
   if (DIM != 3) return false; // PVFMM only supports 3D
-  if (periodicity_ != Periodicity::NONE) return true;
+  const bool compat = PVFMMCompatible(trg_name); // same on every rank: kernels are set collectively
+  if (periodicity_ != Periodicity::NONE) {
+    SCTL_ASSERT_MSG(compat, "ParticleFMM: periodic evaluation needs PVFMM, which cannot evaluate kernels with a context pointer (e.g. Helmholtz) or translation kernels (M2M, M2L, L2L, M2T, L2T) with normals.");
+    return true;
+  }
+  if (!compat) return false; // direct evaluation
   StaticArray<Long,2> cnt{trg_map.at(trg_name).X.Dim()/DIM, 0};
   comm_.Allreduce(cnt+0, cnt+1, 1, CommOp::SUM);
   return (cnt[1] >= 40000); // direct evaluation for small problems
@@ -1189,6 +1234,9 @@ template <class Real, Integer DIM> void ParticleFMM<Real,DIM>::EvalPVFMM(Vector<
         pvfmm_ker_s2t.k_l2t = &trg_data.pvfmm_ker_l2t;
         pvfmm_ker_s2t.k_s2m = &src_data.pvfmm_ker_s2m;
         pvfmm_ker_s2t.k_s2l = &src_data.pvfmm_ker_s2l;
+        // PVFMM's particle FMM names its precomputed-operator file after this kernel; the file depends only on M2L (and vol_poten)
+        pvfmm_ker_s2t.ker_name = fmm_ker.pvfmm_ker_m2l.ker_name;
+        if (fmm_ker.pvfmm_ker_m2l.vol_poten && trg_data.pvfmm_ker_m2t.vol_poten) pvfmm_ker_s2t.ker_name += "-vp";
         fmm_ctx.Initialize(mult_order, comm_, &pvfmm_ker_s2t);
         s2t_data.setup_ker = false;
         s2t_data.setup_tree = true;
