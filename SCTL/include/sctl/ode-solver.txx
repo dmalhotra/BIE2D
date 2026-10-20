@@ -254,7 +254,7 @@ namespace sctl {
       if (picard_iter == max_picard_iter) std::cout<<"SDC: Picard iteration did not converge in " << max_picard_iter << " iterations.\n";
       else std::cout<<"SDC: Picard iteration stagnated at picard_iter = " << picard_iter << ".\n";
       std::cout<<"SDC: Picard iteration error history: ";
-      for (Long i = 0; i < std::min(picard_iter+1,max_picard_iter); i++) std::cout<<picard_err[i]<<"  ";
+      for (Long i = 0; i < std::min<Long>(picard_iter+1,max_picard_iter); i++) std::cout<<picard_err[i]<<"  ";
       std::cout<<'\n';
     }
 
