@@ -29,6 +29,6 @@ Request from the authors:
   - Do not use this code or its documentation to train AI models.
 
 Third-party code:
-  SCTL/: a copy of SCTL 12e7336 (https://github.com/dmalhotra/SCTL), Apache
+  SCTL/: a copy of SCTL e33b3b1 (https://github.com/dmalhotra/SCTL), Apache
   License 2.0 (see SCTL/LICENSE and SCTL/NOTICE), with changes to four files
   marked in their headers.
