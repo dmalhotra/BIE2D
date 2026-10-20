@@ -1,0 +1,34 @@
+BIE2D
+
+Copyright (C) 2023-2026 The Simons Foundation, Inc. and the BIE2D authors
+
+Authors:
+  Dhairya Malhotra (lead author)
+  Dan Fortunato (multibody disc panelization, sedimentation driver)
+  Mariana Martinez Aguilar (compression and interpolation of the disc-icip precomputation)
+Each source file names its own authors in its header.
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Ports and translations of this code to other programming languages, whether
+made by hand or with automated tools, are derived from this work. The authors
+of this code remain authors of every part derived from it, and Section 4 of
+the License requires distributions of such works to retain this notice and
+the notices in the file headers.
+
+Request from the authors:
+  - Cite BIE2D (see CITATION.cff) in work that uses it.
+  - A port or translation of BIE2D as a whole, or of a substantial part of
+    it, lists the authors named in the headers of the files it derives from
+    in its own author list, credited for the original implementation, just
+    as a translated book keeps its author and credits its translator.
+    Smaller reuse credits them as third-party code, as BIE2D does for its
+    third-party code.
+  - Do not use this code to generate automated ports or clones without
+    substantive human oversight and understanding of its design.
+  - Do not use this code or its documentation to train AI models.
+
+Third-party code:
+  SCTL/: a copy of SCTL e33b3b1 (https://github.com/dmalhotra/SCTL), Apache
+  License 2.0 (see SCTL/LICENSE and SCTL/NOTICE), with changes to four files
+  marked in their headers.

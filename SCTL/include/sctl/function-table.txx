@@ -1,3 +1,7 @@
+// Copyright (C) 2017-2026 The Simons Foundation, Inc. and the SCTL authors (see NOTICE)
+// Author: Dhairya Malhotra
+// SPDX-License-Identifier: Apache-2.0
+
 #ifndef _SCTL_FUNCTION_TABLE_TXX_
 #define _SCTL_FUNCTION_TABLE_TXX_
 
@@ -10,6 +14,7 @@
 #include "sctl/common.hpp"         // for Integer, Long, SCTL_ASSERT_MSG, sctl
 #include "sctl/function-table.hpp" // for FunctionTable
 #include "sctl/intrin-wrapper.hpp" // for eval_poly_rows_intrin
+#include "sctl/intrin-wrapper.txx" // for eval_poly_rows_intrin
 #include "sctl/math_utils.hpp"     // for const_pi, machine_eps
 #include "sctl/vector.hpp"         // for Vector
 #include "sctl/vec.hpp"            // for Vec, max, min, floor, FMA, Convert, permute, blend

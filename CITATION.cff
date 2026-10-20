@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use BIE2D, please cite it as below."
+type: software
+title: "BIE2D"
+authors:
+  - given-names: Dhairya
+    family-names: Malhotra
+  - given-names: Dan
+    family-names: Fortunato
+  - given-names: Mariana
+    family-names: Martinez Aguilar
+abstract: "A header-only C++ library, built on SCTL, for boundary integral equations in two dimensions on many close-to-touching discs: the Laplace capacitance and elastance problems and the Stokes mobility problem, with panel quadratures and compressed preconditioners for nearly touching discs, and drivers for the sedimentation of discs in Stokes flow."
+repository-code: "https://github.com/dmalhotra/BIE2D"
+license: Apache-2.0
+references:
+  - type: software
+    title: "SCTL: Scientific Computing Template Library"
+    authors:
+      - given-names: Dhairya
+        family-names: Malhotra
+      - given-names: Tianyue
+        family-names: Li
+      - given-names: Robert
+        family-names: Blackwell
+      - given-names: Wen
+        family-names: Yan
+      - given-names: Xuanzhao
+        family-names: Gao
+    repository-code: "https://github.com/dmalhotra/SCTL"
+    url: "https://sctl.readthedocs.io"
+    license: Apache-2.0
+    notes: "BIE2D is built on SCTL; a copy of SCTL is bundled in SCTL/."
+  - type: software
+    title: fmm2d
+    authors:
+      - given-names: Travis
+        family-names: Askham
+      - given-names: Zydrunas
+        family-names: Gimbutas
+      - given-names: Leslie
+        family-names: Greengard
+      - given-names: Libin
+        family-names: Lu
+      - given-names: Mike
+        family-names: "O'Neil"
+      - given-names: Manas
+        family-names: Rachh
+      - given-names: Vladimir
+        family-names: Rokhlin
+    repository-code: "https://github.com/flatironinstitute/fmm2d"
+    url: "https://fmm2d.readthedocs.io"
+    license: Apache-2.0
+    notes: "The Stokes FMM (stfmm2d) used through SCTL's ParticleFMM; a git submodule in extern/fmm2d."

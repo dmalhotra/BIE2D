@@ -1,3 +1,8 @@
+// Copyright (C) 2017-2026 The Simons Foundation, Inc. and the SCTL authors (see NOTICE)
+// Author: Dhairya Malhotra
+// SPDX-License-Identifier: Apache-2.0
+// Modified in BIE2D by Dhairya Malhotra: SDC with a batched right-hand side, parallel Picard iterations and initial guesses.
+
 #ifndef _SCTL_ODE_SOLVER_HPP_
 #define _SCTL_ODE_SOLVER_HPP_
 

@@ -1,3 +1,7 @@
+// Copyright (C) 2023-2026 The Simons Foundation, Inc. and the BIE2D authors (see NOTICE)
+// Authors: Dhairya Malhotra, Dan Fortunato, Mariana Martinez Aguilar
+// SPDX-License-Identifier: Apache-2.0
+
 namespace sctl {
 
   template <class Real, Integer Order> DiscCapacitance<Real,Order>::DiscCapacitance(const Comm& comm_) : ICIP_Base(comm_), LaplaceSL_BIOp(this->comm), LaplaceDL_BIOp(this->comm) {}

@@ -1,3 +1,7 @@
+// Copyright (C) 2023-2026 The Simons Foundation, Inc. and the BIE2D authors (see NOTICE)
+// Authors: Dhairya Malhotra, Dan Fortunato, Mariana Martinez Aguilar
+// SPDX-License-Identifier: Apache-2.0
+
 namespace sctl {
 
   template <class Real, Integer Order, class Kernel> DiscBIOp<Real,Order,Kernel>::DiscBIOp(const Comm& comm_) : comm(comm_), biop_n2f(ker, false, comm), biop_f2a(ker, false, comm) {}

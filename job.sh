@@ -1,4 +1,8 @@
 #!/bin/bash -l
+# Copyright (C) 2023-2026 The Simons Foundation, Inc. and the BIE2D authors (see NOTICE)
+# Authors: Dhairya Malhotra, Dan Fortunato, Mariana Martinez Aguilar
+# SPDX-License-Identifier: Apache-2.0
+
 #SBATCH --partition=ccm
 #SBATCH --constraint=icelake
 #SBATCH --time=10080
